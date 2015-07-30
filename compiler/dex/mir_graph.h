@@ -114,6 +114,8 @@ enum DataFlowAttributePos {
   kUsesSField,           // Accesses a static field (SGET/SPUT).
   kDoLVN,                // Worth computing local value numbers.
   kZeroDivCheck,         // check for zero divider
+  kIsInvoke,
+  kIsArray
 };
 
 #define DF_NOP                  UINT64_C(0)
@@ -154,6 +156,8 @@ enum DataFlowAttributePos {
 #define DF_SFIELD               (UINT64_C(1) << kUsesSField)
 #define DF_LVN                  (UINT64_C(1) << kDoLVN)
 #define DF_ZERO_DIV_CHECK       (UINT64_C(1) << kZeroDivCheck)
+#define DF_IS_INVOKE            (UINT64_C(1) << kIsInvoke)
+#define DF_IS_ARRAY                (UINT64_C(1) << kIsArray)
 
 #define DF_HAS_USES             (DF_UA | DF_UB | DF_UC)
 
