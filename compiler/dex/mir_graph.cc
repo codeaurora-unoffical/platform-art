@@ -240,6 +240,7 @@ BasicBlock* MIRGraph::SplitBlock(DexOffset code_offset,
          !MIR::DecodedInstruction::IsPseudoMirOp(insn->dalvikInsn.opcode));
   DCHECK_EQ(dex_pc_to_block_map_.Get(insn->offset), orig_block->id);
   MIR* p = insn;
+  p->bb = bottom_block->id;
   dex_pc_to_block_map_.Put(p->offset, bottom_block->id);
   while (p != bottom_block->last_mir_insn) {
     p = p->next;
