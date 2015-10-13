@@ -42,6 +42,12 @@
 #include "utils/swap_space.h"
 #include "dex/verified_method.h"
 
+#ifdef QC_STRONG
+#define QC_WEAK
+#else
+#define QC_WEAK __attribute__((weak))
+#endif
+
 namespace art {
 
 namespace verifier {
@@ -428,6 +434,8 @@ class CompilerDriver {
   CumulativeLogger* GetTimingsLogger() const {
     return timings_logger_;
   }
+
+  SafeMap<int32_t, int32_t> *GetStatusMap(Thread *self) QC_WEAK;
 
   class PatchInformation {
    public:
@@ -928,6 +936,8 @@ class CompilerDriver {
             SwapVector<uint8_t>, size_t, DedupeHashFunc, 4> dedupe_gc_map_;
   DedupeSet<ArrayRef<const uint8_t>,
             SwapVector<uint8_t>, size_t, DedupeHashFunc, 4> dedupe_cfi_info_;
+
+  std::unique_ptr<std::vector<SafeMap<int32_t, int32_t>>> status_map_;
 
   DISALLOW_COPY_AND_ASSIGN(CompilerDriver);
 };

@@ -371,7 +371,8 @@ CompilerDriver::CompilerDriver(const CompilerOptions* compiler_options,
       dedupe_mapping_table_("dedupe mapping table", *swap_space_allocator_),
       dedupe_vmap_table_("dedupe vmap table", *swap_space_allocator_),
       dedupe_gc_map_("dedupe gc map", *swap_space_allocator_),
-      dedupe_cfi_info_("dedupe cfi info", *swap_space_allocator_) {
+      dedupe_cfi_info_("dedupe cfi info", *swap_space_allocator_),
+      status_map_(new std::vector<SafeMap<int32_t, int32_t>>(thread_count)) {
   DCHECK(compiler_options_ != nullptr);
   DCHECK(verification_results_ != nullptr);
   DCHECK(method_inliner_map_ != nullptr);
@@ -2041,6 +2042,13 @@ void CompilerDriver::CompileClass(const ParallelCompilationManager* manager, siz
   }
   CompilerDriver* driver = manager->GetCompiler();
 
+  SafeMap<int32_t, int32_t> *status_map = driver->GetStatusMap(Thread::Current());
+
+  if (status_map != nullptr) {
+    status_map->clear();
+  }
+
+
   bool compilation_enabled = driver->IsClassToCompile(
       dex_file.StringByTypeIdx(class_def.class_idx_));
 
@@ -2323,5 +2331,11 @@ std::string CompilerDriver::GetMemoryUsageString(bool extended) const {
   }
   return oss.str();
 }
+
+SafeMap<int32_t, int32_t> *CompilerDriver::GetStatusMap(Thread *)
+{
+  return nullptr;
+}
+
 
 }  // namespace art
