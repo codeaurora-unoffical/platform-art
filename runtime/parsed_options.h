@@ -48,6 +48,7 @@ class ParsedOptions {
   std::string native_bridge_library_filename_;
   CompilerCallbacks* compiler_callbacks_;
   bool is_zygote_;
+  unsigned int zygote_max_failed_boots_;
   bool must_relocate_;
   bool dex2oat_enabled_;
   bool image_dex2oat_enabled_;

@@ -148,7 +148,8 @@ Runtime::Runtime()
       implicit_null_checks_(false),
       implicit_so_checks_(false),
       implicit_suspend_checks_(false),
-      is_native_bridge_loaded_(false) {
+      is_native_bridge_loaded_(false),
+      zygote_max_failed_boots_(0) {
 }
 
 Runtime::~Runtime() {
@@ -718,6 +719,8 @@ bool Runtime::Init(const RuntimeOptions& raw_options, bool ignore_unrecognized) 
   if (options->interpreter_only_) {
     GetInstrumentation()->ForceInterpretOnly();
   }
+
+  zygote_max_failed_boots_ = options->zygote_max_failed_boots_;
 
   heap_ = new gc::Heap(options->heap_initial_size_,
                        options->heap_growth_limit_,

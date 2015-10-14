@@ -227,6 +227,7 @@ bool ParsedOptions::Parse(const RuntimeOptions& options, bool ignore_unrecognize
 
   compiler_callbacks_ = nullptr;
   is_zygote_ = false;
+  zygote_max_failed_boots_ = 1;
   must_relocate_ = kDefaultMustRelocate;
   dex2oat_enabled_ = true;
   image_dex2oat_enabled_ = true;
@@ -511,6 +512,10 @@ bool ParsedOptions::Parse(const RuntimeOptions& options, bool ignore_unrecognize
       Split(option.substr(strlen("-verbose-methods:")), ',', gVerboseMethods);
     } else if (StartsWith(option, "-Xlockprofthreshold:")) {
       if (!ParseUnsignedInteger(option, ':', &lock_profiling_threshold_)) {
+        return false;
+      }
+    } else if (StartsWith(option, "-XzygoteMaxFailedBoots:")) {
+      if (!ParseUnsignedInteger(option, ':', &zygote_max_failed_boots_)) {
         return false;
       }
     } else if (StartsWith(option, "-Xstacktracefile:")) {
