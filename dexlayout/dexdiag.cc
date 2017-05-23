@@ -197,7 +197,8 @@ static void ProcessPageMap(uint64_t* pagemap,
   for (size_t page = start; page < end; ++page) {
     char type_char = '.';
     if (PM_PAGEMAP_PRESENT(pagemap[page])) {
-      uint16_t type = FindSectionTypeForPage(page, sections);
+      const size_t dex_page_offset = page - start;
+      uint16_t type = FindSectionTypeForPage(dex_page_offset, sections);
       page_counts->Increment(type);
       type_char = PageTypeChar(type);
     }
@@ -228,7 +229,8 @@ static void DisplayDexStatistics(size_t start,
     return;
   }
   for (size_t page = start; page < end; ++page) {
-    mapped_pages.Increment(FindSectionTypeForPage(page, sections));
+    const size_t dex_page_offset = page - start;
+    mapped_pages.Increment(FindSectionTypeForPage(dex_page_offset, sections));
   }
   size_t total_resident_pages = 0;
   printer->PrintHeader();
@@ -313,6 +315,7 @@ static bool DisplayMappingIfFromVdexFile(pm_map_t* map, Printer* printer) {
   std::unique_ptr<VdexFile> vdex(VdexFile::Open(vdex_name,
                                                 false /*writeable*/,
                                                 false /*low_4gb*/,
+                                                false /*unquicken */,
                                                 &error_msg /*out*/));
   if (vdex == nullptr) {
     std::cerr << "Could not open vdex file "
