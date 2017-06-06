@@ -268,20 +268,17 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("      Default: Optimizing");
   UsageError("");
   UsageError("  --compiler-filter="
-                "(verify-none"
-                "|verify-at-runtime"
-                "|verify-profile"
-                "|interpret-only"
-                "|time"
+                "(assume-verified"
+                "|extract"
+                "|verify"
+                "|quicken"
                 "|space-profile"
                 "|space"
-                "|balanced"
                 "|speed-profile"
                 "|speed"
                 "|everything-profile"
                 "|everything):");
   UsageError("      select compiler filter.");
-  UsageError("      verify-profile requires a --profile(-fd) to also be passed in.");
   UsageError("      Example: --compiler-filter=everything");
   UsageError("      Default: speed");
   UsageError("");
@@ -382,8 +379,6 @@ NO_RETURN static void Usage(const char* fmt, ...) {
              "input dex file.");
   UsageError("");
   UsageError("  --force-determinism: force the compiler to emit a deterministic output.");
-  UsageError("      This option is incompatible with read barriers (e.g., if dex2oat has been");
-  UsageError("      built with the environment variable `ART_USE_READ_BARRIER` set to `true`).");
   UsageError("");
   UsageError("  --classpath-dir=<directory-path>: directory used to resolve relative class paths.");
   UsageError("");
@@ -723,6 +718,10 @@ class Dex2Oat FINAL {
       Usage("Can't have both --input-vdex-fd and --input-vdex");
     }
 
+    if (output_vdex_fd_ != -1 && !output_vdex_.empty()) {
+      Usage("Can't have both --output-vdex-fd and --output-vdex");
+    }
+
     if (!oat_filenames_.empty() && oat_fd_ != -1) {
       Usage("--oat-file should not be used with --oat-fd");
     }
@@ -915,9 +914,10 @@ class Dex2Oat FINAL {
     // Fill some values into the key-value store for the oat header.
     key_value_store_.reset(new SafeMap<std::string, std::string>());
 
-    // Automatically force determinism for the boot image in a host build if the default GC is CMS
-    // or MS and read barriers are not enabled, as the former switches the GC to a non-concurrent
-    // one by passing the option `-Xgc:nonconcurrent` (see below).
+    // Automatically force determinism for the boot image in a host build if read barriers
+    // are enabled, or if the default GC is CMS or MS. When the default GC is CMS
+    // (Concurrent Mark-Sweep), the GC is switched to a non-concurrent one by passing the
+    // option `-Xgc:nonconcurrent` (see below).
     if (!kIsTargetBuild && IsBootImage()) {
       if (SupportsDeterministicCompilation()) {
         force_determinism_ = true;
@@ -939,9 +939,9 @@ class Dex2Oat FINAL {
   }
 
   static bool SupportsDeterministicCompilation() {
-    return (gc::kCollectorTypeDefault == gc::kCollectorTypeCMS ||
-            gc::kCollectorTypeDefault == gc::kCollectorTypeMS) &&
-        !kEmitCompilerReadBarrier;
+    return (kUseReadBarrier ||
+            gc::kCollectorTypeDefault == gc::kCollectorTypeCMS ||
+            gc::kCollectorTypeDefault == gc::kCollectorTypeMS);
   }
 
   void ExpandOatAndImageFilenames() {
@@ -1126,6 +1126,8 @@ class Dex2Oat FINAL {
         ParseInputVdexFd(option);
       } else if (option.starts_with("--input-vdex=")) {
         input_vdex_ = option.substr(strlen("--input-vdex=")).data();
+      } else if (option.starts_with("--output-vdex=")) {
+        output_vdex_ = option.substr(strlen("--output-vdex=")).data();
       } else if (option.starts_with("--output-vdex-fd=")) {
         ParseOutputVdexFd(option);
       } else if (option.starts_with("--oat-file=")) {
@@ -1233,7 +1235,7 @@ class Dex2Oat FINAL {
         no_inline_from_string_ = option.substr(strlen("--no-inline-from=")).data();
       } else if (option == "--force-determinism") {
         if (!SupportsDeterministicCompilation()) {
-          Usage("Cannot use --force-determinism with read barriers or non-CMS garbage collector");
+          Usage("Option --force-determinism requires read barriers or a CMS/MS garbage collector");
         }
         force_determinism_ = true;
       } else if (option.starts_with("--classpath-dir=")) {
@@ -1261,6 +1263,7 @@ class Dex2Oat FINAL {
     }
 
     // OAT and VDEX file handling
+    bool eagerly_unquicken_vdex = DoDexLayoutOptimizations();
 
     if (oat_fd_ == -1) {
       DCHECK(!oat_filenames_.empty());
@@ -1282,12 +1285,15 @@ class Dex2Oat FINAL {
           input_vdex_file_ = VdexFile::Open(input_vdex_,
                                             /* writable */ false,
                                             /* low_4gb */ false,
+                                            eagerly_unquicken_vdex,
                                             &error_msg);
         }
 
         DCHECK_EQ(output_vdex_fd_, -1);
-        std::string vdex_filename = ReplaceFileExtension(oat_filename, "vdex");
-        if (vdex_filename == input_vdex_) {
+        std::string vdex_filename = output_vdex_.empty()
+            ? ReplaceFileExtension(oat_filename, "vdex")
+            : output_vdex_;
+        if (vdex_filename == input_vdex_ && output_vdex_.empty()) {
           update_input_vdex_ = true;
           std::unique_ptr<File> vdex_file(OS::OpenFileReadWrite(vdex_filename.c_str()));
           vdex_files_.push_back(std::move(vdex_file));
@@ -1329,6 +1335,7 @@ class Dex2Oat FINAL {
                                             "vdex",
                                             /* writable */ false,
                                             /* low_4gb */ false,
+                                            eagerly_unquicken_vdex,
                                             &error_msg);
           // If there's any problem with the passed vdex, just warn and proceed
           // without it.
@@ -1357,6 +1364,26 @@ class Dex2Oat FINAL {
       vdex_files_.push_back(std::move(vdex_file));
 
       oat_filenames_.push_back(oat_location_.c_str());
+    }
+
+    // If we're updating in place a vdex file, be defensive and put an invalid vdex magic in case
+    // dex2oat gets killed.
+    // Note: we're only invalidating the magic data in the file, as dex2oat needs the rest of
+    // the information to remain valid.
+    if (update_input_vdex_) {
+      std::unique_ptr<BufferedOutputStream> vdex_out(MakeUnique<BufferedOutputStream>(
+          MakeUnique<FileOutputStream>(vdex_files_.back().get())));
+      if (!vdex_out->WriteFully(&VdexFile::Header::kVdexInvalidMagic,
+                                arraysize(VdexFile::Header::kVdexInvalidMagic))) {
+        PLOG(ERROR) << "Failed to invalidate vdex header. File: " << vdex_out->GetLocation();
+        return false;
+      }
+
+      if (!vdex_out->Flush()) {
+        PLOG(ERROR) << "Failed to flush stream after invalidating header of vdex file."
+                    << " File: " << vdex_out->GetLocation();
+        return false;
+      }
     }
 
     // Swap file handling
@@ -1571,14 +1598,14 @@ class Dex2Oat FINAL {
 
     // If we need to downgrade the compiler-filter for size reasons, do that check now.
     if (!IsBootImage() && IsVeryLarge(dex_files_)) {
-      if (!CompilerFilter::IsAsGoodAs(CompilerFilter::kVerifyAtRuntime,
+      if (!CompilerFilter::IsAsGoodAs(CompilerFilter::kExtract,
                                       compiler_options_->GetCompilerFilter())) {
-        LOG(INFO) << "Very large app, downgrading to verify-at-runtime.";
+        LOG(INFO) << "Very large app, downgrading to extract.";
         // Note: this change won't be reflected in the key-value store, as that had to be
         //       finalized before loading the dex files. This setup is currently required
         //       to get the size from the DexFile objects.
         // TODO: refactor. b/29790079
-        compiler_options_->SetCompilerFilter(CompilerFilter::kVerifyAtRuntime);
+        compiler_options_->SetCompilerFilter(CompilerFilter::kExtract);
       }
     }
 
@@ -2086,20 +2113,19 @@ class Dex2Oat FINAL {
   }
 
   bool DoProfileGuidedOptimizations() const {
-    return UseProfile() && compiler_options_->GetCompilerFilter() != CompilerFilter::kVerifyProfile;
+    return UseProfile();
   }
 
   bool DoDexLayoutOptimizations() const {
     return DoProfileGuidedOptimizations();
   }
 
-  bool HasInputVdexFile() const {
-    return input_vdex_file_ != nullptr || input_vdex_fd_ != -1 || !input_vdex_.empty();
-  }
-
   bool LoadProfile() {
     DCHECK(UseProfile());
-
+    // TODO(calin): We should be using the runtime arena pool (instead of the
+    // default profile arena). However the setup logic is messy and needs
+    // cleaning up before that (e.g. the oat writers are created before the
+    // runtime).
     profile_compilation_info_.reset(new ProfileCompilationInfo());
     ScopedFlock flock;
     bool success = true;
@@ -2150,16 +2176,6 @@ class Dex2Oat FINAL {
       dex_files_size += dex_file->GetHeader().file_size_;
     }
     return dex_files_size >= very_large_threshold_;
-  }
-
-  template <typename T>
-  static std::vector<T*> MakeNonOwningPointerVector(const std::vector<std::unique_ptr<T>>& src) {
-    std::vector<T*> result;
-    result.reserve(src.size());
-    for (const std::unique_ptr<T>& t : src) {
-      result.push_back(t.get());
-    }
-    return result;
   }
 
   std::vector<std::string> GetClassPathLocations(const std::string& class_path) {
@@ -2421,15 +2437,25 @@ class Dex2Oat FINAL {
     // foreground collector by default for dex2oat.
     raw_options.push_back(std::make_pair("-XX:DisableHSpaceCompactForOOM", nullptr));
 
-    // If we're asked to be deterministic, ensure non-concurrent GC for determinism. Also
-    // force the free-list implementation for large objects.
     if (compiler_options_->IsForceDeterminism()) {
+      // If we're asked to be deterministic, ensure non-concurrent GC for determinism.
+      //
+      // Note that with read barriers, this option is ignored, because Runtime::Init
+      // overrides the foreground GC to be gc::kCollectorTypeCC when instantiating
+      // gc::Heap. This is fine, as concurrent GC requests are not honored in dex2oat,
+      // which uses an unstarted runtime.
       raw_options.push_back(std::make_pair("-Xgc:nonconcurrent", nullptr));
-      raw_options.push_back(std::make_pair("-XX:LargeObjectSpace=freelist", nullptr));
+
+      // The default LOS implementation (map) is not deterministic. So disable it.
+      raw_options.push_back(std::make_pair("-XX:LargeObjectSpace=disabled", nullptr));
 
       // We also need to turn off the nonmoving space. For that, we need to disable HSpace
       // compaction (done above) and ensure that neither foreground nor background collectors
       // are concurrent.
+      //
+      // Likewise, this option is ignored with read barriers because Runtime::Init
+      // overrides the background GC to be gc::kCollectorTypeCCBackground, but that's
+      // fine too, for the same reason (see above).
       raw_options.push_back(std::make_pair("-XX:BackgroundGC=nonconcurrent", nullptr));
 
       // To make identity hashcode deterministic, set a known seed.
@@ -2684,6 +2710,7 @@ class Dex2Oat FINAL {
   int input_vdex_fd_;
   int output_vdex_fd_;
   std::string input_vdex_;
+  std::string output_vdex_;
   std::unique_ptr<VdexFile> input_vdex_file_;
   std::vector<const char*> dex_filenames_;
   std::vector<const char*> dex_locations_;
@@ -2890,13 +2917,6 @@ static dex2oat::ReturnCode Dex2oat(int argc, char** argv) {
     }
   }
 
-  if (dex2oat->DoDexLayoutOptimizations()) {
-    if (dex2oat->HasInputVdexFile()) {
-      LOG(ERROR) << "Dexlayout is incompatible with an input VDEX";
-      return dex2oat::ReturnCode::kOther;
-    }
-  }
-
   art::MemMap::Init();  // For ZipEntry::ExtractToMemMap, and vdex.
 
   // Check early that the result of compilation can be written
@@ -2944,7 +2964,7 @@ int main(int argc, char** argv) {
   // time (bug 10645725) unless we're a debug build or running on valgrind. Note: The Dex2Oat class
   // should not destruct the runtime in this case.
   if (!art::kIsDebugBuild && (RUNNING_ON_MEMORY_TOOL == 0)) {
-    exit(result);
+    _exit(result);
   }
   return result;
 }

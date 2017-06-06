@@ -34,7 +34,7 @@
 
 #include "android-base/stringprintf.h"
 
-#include "art_method-inl.h"
+#include "art_method.h"
 #include "base/bit_vector.h"
 #include "base/enums.h"
 #include "base/stl_util.h"
@@ -193,7 +193,7 @@ bool OatFileBase::LoadVdex(const std::string& vdex_filename,
                            bool writable,
                            bool low_4gb,
                            std::string* error_msg) {
-  vdex_ = VdexFile::Open(vdex_filename, writable, low_4gb, error_msg);
+  vdex_ = VdexFile::Open(vdex_filename, writable, low_4gb, /* unquicken*/ false, error_msg);
   if (vdex_.get() == nullptr) {
     *error_msg = StringPrintf("Failed to load vdex file '%s' %s",
                               vdex_filename.c_str(),
@@ -1064,7 +1064,7 @@ OatFile* OatFile::Open(const std::string& oat_filename,
   CHECK(!oat_filename.empty()) << oat_location;
   CheckLocation(oat_location);
 
-  std::string vdex_filename = ReplaceFileExtension(oat_filename, "vdex");
+  std::string vdex_filename = GetVdexFilename(oat_filename);
 
   // Check that the files even exist, fast-fail.
   if (kIsVdexEnabled && !OS::FileExists(vdex_filename.c_str())) {

@@ -22,18 +22,22 @@
 #include "gc/collector/concurrent_copying-inl.h"
 #include "gc/heap.h"
 #include "mirror/object_reference.h"
+#include "mirror/object-readbarrier-inl.h"
 #include "mirror/reference.h"
 #include "runtime.h"
 #include "utils.h"
 
 namespace art {
 
+// Disabled for performance reasons.
+static constexpr bool kCheckDebugDisallowReadBarrierCount = false;
+
 template <typename MirrorType, ReadBarrierOption kReadBarrierOption, bool kAlwaysUpdateField>
 inline MirrorType* ReadBarrier::Barrier(
     mirror::Object* obj, MemberOffset offset, mirror::HeapReference<MirrorType>* ref_addr) {
   constexpr bool with_read_barrier = kReadBarrierOption == kWithReadBarrier;
   if (kUseReadBarrier && with_read_barrier) {
-    if (kIsDebugBuild) {
+    if (kCheckDebugDisallowReadBarrierCount) {
       Thread* const self = Thread::Current();
       if (self != nullptr) {
         CHECK_EQ(self->GetDebugDisallowReadBarrierCount(), 0u);
@@ -176,6 +180,26 @@ inline MirrorType* ReadBarrier::BarrierForRoot(mirror::CompressedReference<Mirro
   } else {
     return ref;
   }
+}
+
+template <typename MirrorType>
+inline MirrorType* ReadBarrier::IsMarked(MirrorType* ref) {
+  // Only read-barrier configurations can have mutators run while
+  // the GC is marking.
+  if (!kUseReadBarrier) {
+    return ref;
+  }
+  // IsMarked does not handle null, so handle it here.
+  if (ref == nullptr) {
+    return nullptr;
+  }
+  // IsMarked should only be called when the GC is marking.
+  if (!Thread::Current()->GetIsGcMarking()) {
+    return ref;
+  }
+
+  return reinterpret_cast<MirrorType*>(
+      Runtime::Current()->GetHeap()->ConcurrentCopyingCollector()->IsMarked(ref));
 }
 
 inline bool ReadBarrier::IsDuringStartup() {

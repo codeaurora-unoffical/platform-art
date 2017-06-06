@@ -70,8 +70,6 @@ static inline uint32_t PointerToLowMemUInt32(const void* p) {
   return intp & 0xFFFFFFFFU;
 }
 
-uint8_t* DecodeBase64(const char* src, size_t* dst_size);
-
 std::string PrintableChar(uint16_t ch);
 
 // Returns an ASCII string corresponding to the given UTF-8 string.
@@ -174,6 +172,9 @@ bool GetDalvikCacheFilename(const char* file_location, const char* cache_locatio
 
 // Returns the system location for an image
 std::string GetSystemImageFilename(const char* location, InstructionSet isa);
+
+// Returns the vdex filename for the given oat filename.
+std::string GetVdexFilename(const std::string& oat_filename);
 
 // Returns true if the file exists.
 bool FileExists(const std::string& filename);

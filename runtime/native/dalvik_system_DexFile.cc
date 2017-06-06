@@ -622,6 +622,31 @@ static jstring DexFile_getNonProfileGuidedCompilerFilter(JNIEnv* env,
   return env->NewStringUTF(new_filter_str.c_str());
 }
 
+static jstring DexFile_getSafeModeCompilerFilter(JNIEnv* env,
+                                                 jclass javeDexFileClass ATTRIBUTE_UNUSED,
+                                                 jstring javaCompilerFilter) {
+  ScopedUtfChars compiler_filter(env, javaCompilerFilter);
+  if (env->ExceptionCheck()) {
+    return nullptr;
+  }
+
+  CompilerFilter::Filter filter;
+  if (!CompilerFilter::ParseCompilerFilter(compiler_filter.c_str(), &filter)) {
+    return javaCompilerFilter;
+  }
+
+  CompilerFilter::Filter new_filter = CompilerFilter::GetSafeModeFilterFrom(filter);
+
+  // Filter stayed the same, return input.
+  if (filter == new_filter) {
+    return javaCompilerFilter;
+  }
+
+  // Create a new string object and return.
+  std::string new_filter_str = CompilerFilter::NameOfFilter(new_filter);
+  return env->NewStringUTF(new_filter_str.c_str());
+}
+
 static jboolean DexFile_isBackedByOatFile(JNIEnv* env, jclass, jobject cookie) {
   const OatFile* oat_file = nullptr;
   std::vector<const DexFile*> dex_files;
@@ -632,7 +657,7 @@ static jboolean DexFile_isBackedByOatFile(JNIEnv* env, jclass, jobject cookie) {
   return oat_file != nullptr;
 }
 
-static jstring DexFile_getDexFileOutputPath(JNIEnv* env,
+static jobjectArray DexFile_getDexFileOutputPaths(JNIEnv* env,
                                             jclass,
                                             jstring javaFilename,
                                             jstring javaInstructionSet) {
@@ -664,7 +689,26 @@ static jstring DexFile_getDexFileOutputPath(JNIEnv* env,
     return nullptr;
   }
 
-  return env->NewStringUTF(best_oat_file->GetLocation().c_str());
+  std::string oat_filename = best_oat_file->GetLocation();
+  std::string vdex_filename = GetVdexFilename(best_oat_file->GetLocation());
+
+  ScopedLocalRef<jstring> jvdexFilename(env, env->NewStringUTF(vdex_filename.c_str()));
+  if (jvdexFilename.get() == nullptr) {
+    return nullptr;
+  }
+  ScopedLocalRef<jstring> joatFilename(env, env->NewStringUTF(oat_filename.c_str()));
+  if (joatFilename.get() == nullptr) {
+    return nullptr;
+  }
+
+  // Now create output array and copy the set into it.
+  jobjectArray result = env->NewObjectArray(2,
+                                            WellKnownClasses::java_lang_String,
+                                            nullptr);
+  env->SetObjectArrayElement(result, 0, jvdexFilename.get());
+  env->SetObjectArrayElement(result, 1, joatFilename.get());
+
+  return result;
 }
 
 static JNINativeMethod gMethods[] = {
@@ -695,11 +739,14 @@ static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(DexFile,
                 getNonProfileGuidedCompilerFilter,
                 "(Ljava/lang/String;)Ljava/lang/String;"),
+  NATIVE_METHOD(DexFile,
+                getSafeModeCompilerFilter,
+                "(Ljava/lang/String;)Ljava/lang/String;"),
   NATIVE_METHOD(DexFile, isBackedByOatFile, "(Ljava/lang/Object;)Z"),
   NATIVE_METHOD(DexFile, getDexFileStatus,
                 "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"),
-  NATIVE_METHOD(DexFile, getDexFileOutputPath,
-                "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;")
+  NATIVE_METHOD(DexFile, getDexFileOutputPaths,
+                "(Ljava/lang/String;Ljava/lang/String;)[Ljava/lang/String;")
 };
 
 void register_dalvik_system_DexFile(JNIEnv* env) {

@@ -22,6 +22,7 @@
 #include "class_linker.h"
 #include "constant_folding.h"
 #include "dead_code_elimination.h"
+#include "dex/inline_method_analyser.h"
 #include "dex/verified_method.h"
 #include "dex/verification_results.h"
 #include "driver/compiler_driver-inl.h"
@@ -37,7 +38,6 @@
 #include "optimizing_compiler.h"
 #include "reference_type_propagation.h"
 #include "register_allocator_linear_scan.h"
-#include "quick/inline_method_analyser.h"
 #include "sharpening.h"
 #include "ssa_builder.h"
 #include "ssa_phi_elimination.h"
@@ -371,6 +371,12 @@ ArtMethod* HInliner::TryCHADevirtualization(ArtMethod* resolved_method) {
     // invoke-virtual because a proxy method doesn't have a real dex file.
     return nullptr;
   }
+  if (!single_impl->GetDeclaringClass()->IsResolved()) {
+    // There's a race with the class loading, which updates the CHA info
+    // before setting the class to resolved. So we just bail for this
+    // rare occurence.
+    return nullptr;
+  }
   return single_impl;
 }
 
@@ -456,6 +462,33 @@ static Handle<mirror::ObjectArray<mirror::Class>> AllocateInlineCacheHolder(
   return inline_cache;
 }
 
+bool HInliner::UseOnlyPolymorphicInliningWithNoDeopt() {
+  // If we are compiling AOT or OSR, pretend the call using inline caches is polymorphic and
+  // do not generate a deopt.
+  //
+  // For AOT:
+  //    Generating a deopt does not ensure that we will actually capture the new types;
+  //    and the danger is that we could be stuck in a loop with "forever" deoptimizations.
+  //    Take for example the following scenario:
+  //      - we capture the inline cache in one run
+  //      - the next run, we deoptimize because we miss a type check, but the method
+  //        never becomes hot again
+  //    In this case, the inline cache will not be updated in the profile and the AOT code
+  //    will keep deoptimizing.
+  //    Another scenario is if we use profile compilation for a process which is not allowed
+  //    to JIT (e.g. system server). If we deoptimize we will run interpreted code for the
+  //    rest of the lifetime.
+  // TODO(calin):
+  //    This is a compromise because we will most likely never update the inline cache
+  //    in the profile (unless there's another reason to deopt). So we might be stuck with
+  //    a sub-optimal inline cache.
+  //    We could be smarter when capturing inline caches to mitigate this.
+  //    (e.g. by having different thresholds for new and old methods).
+  //
+  // For OSR:
+  //     We may come from the interpreter and it may have seen different receiver types.
+  return Runtime::Current()->IsAotCompiler() || outermost_graph_->IsCompilingOsr();
+}
 bool HInliner::TryInlineFromInlineCache(const DexFile& caller_dex_file,
                                         HInvoke* invoke_instruction,
                                         ArtMethod* resolved_method)
@@ -489,9 +522,7 @@ bool HInliner::TryInlineFromInlineCache(const DexFile& caller_dex_file,
 
     case kInlineCacheMonomorphic: {
       MaybeRecordStat(kMonomorphicCall);
-      if (outermost_graph_->IsCompilingOsr()) {
-        // If we are compiling OSR, we pretend this call is polymorphic, as we may come from the
-        // interpreter and it may have seen different receiver types.
+      if (UseOnlyPolymorphicInliningWithNoDeopt()) {
         return TryInlinePolymorphicCall(invoke_instruction, resolved_method, inline_cache);
       } else {
         return TryInlineMonomorphicCall(invoke_instruction, resolved_method, inline_cache);
@@ -564,12 +595,11 @@ HInliner::InlineCacheType HInliner::GetInlineCacheAOT(
     return kInlineCacheNoData;
   }
 
-  ProfileCompilationInfo::OfflineProfileMethodInfo offline_profile;
-  bool found = pci->GetMethod(caller_dex_file.GetLocation(),
-                              caller_dex_file.GetLocationChecksum(),
-                              caller_compilation_unit_.GetDexMethodIndex(),
-                              &offline_profile);
-  if (!found) {
+  std::unique_ptr<ProfileCompilationInfo::OfflineProfileMethodInfo> offline_profile =
+      pci->GetMethod(caller_dex_file.GetLocation(),
+                     caller_dex_file.GetLocationChecksum(),
+                     caller_compilation_unit_.GetDexMethodIndex());
+  if (offline_profile == nullptr) {
     return kInlineCacheNoData;  // no profile information for this invocation.
   }
 
@@ -579,7 +609,7 @@ HInliner::InlineCacheType HInliner::GetInlineCacheAOT(
     return kInlineCacheNoData;
   } else {
     return ExtractClassesFromOfflineProfile(invoke_instruction,
-                                            offline_profile,
+                                            *(offline_profile.get()),
                                             *inline_cache);
   }
 }
@@ -589,8 +619,8 @@ HInliner::InlineCacheType HInliner::ExtractClassesFromOfflineProfile(
     const ProfileCompilationInfo::OfflineProfileMethodInfo& offline_profile,
     /*out*/Handle<mirror::ObjectArray<mirror::Class>> inline_cache)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  const auto it = offline_profile.inline_caches.find(invoke_instruction->GetDexPc());
-  if (it == offline_profile.inline_caches.end()) {
+  const auto it = offline_profile.inline_caches->find(invoke_instruction->GetDexPc());
+  if (it == offline_profile.inline_caches->end()) {
     return kInlineCacheUninitialized;
   }
 
@@ -769,7 +799,7 @@ void HInliner::AddCHAGuard(HInstruction* invoke_instruction,
   HInstruction* compare = new (graph_->GetArena()) HNotEqual(
       deopt_flag, graph_->GetIntConstant(0, dex_pc));
   HInstruction* deopt = new (graph_->GetArena()) HDeoptimize(
-      graph_->GetArena(), compare, HDeoptimize::Kind::kInline, dex_pc);
+      graph_->GetArena(), compare, DeoptimizationKind::kCHA, dex_pc);
 
   if (cursor != nullptr) {
     bb_cursor->InsertInstructionAfter(deopt_flag, cursor);
@@ -803,7 +833,17 @@ HInstruction* HInliner::AddTypeGuard(HInstruction* receiver,
   }
 
   const DexFile& caller_dex_file = *caller_compilation_unit_.GetDexFile();
-  bool is_referrer = (klass.Get() == outermost_graph_->GetArtMethod()->GetDeclaringClass());
+  bool is_referrer;
+  ArtMethod* outermost_art_method = outermost_graph_->GetArtMethod();
+  if (outermost_art_method == nullptr) {
+    DCHECK(Runtime::Current()->IsAotCompiler());
+    // We are in AOT mode and we don't have an ART method to determine
+    // if the inlined method belongs to the referrer. Assume it doesn't.
+    is_referrer = false;
+  } else {
+    is_referrer = klass.Get() == outermost_art_method->GetDeclaringClass();
+  }
+
   // Note that we will just compare the classes, so we don't need Java semantics access checks.
   // Note that the type index and the dex file are relative to the method this type guard is
   // inlined into.
@@ -836,7 +876,9 @@ HInstruction* HInliner::AddTypeGuard(HInstruction* receiver,
         graph_->GetArena(),
         compare,
         receiver,
-        HDeoptimize::Kind::kInline,
+        Runtime::Current()->IsAotCompiler()
+            ? DeoptimizationKind::kAotInlineCache
+            : DeoptimizationKind::kJitInlineCache,
         invoke_instruction->GetDexPc());
     bb_cursor->InsertInstructionAfter(deoptimize, compare);
     deoptimize->CopyEnvironmentFrom(invoke_instruction->GetEnvironment());
@@ -900,14 +942,11 @@ bool HInliner::TryInlinePolymorphicCall(HInvoke* invoke_instruction,
 
       // If we have inlined all targets before, and this receiver is the last seen,
       // we deoptimize instead of keeping the original invoke instruction.
-      bool deoptimize = all_targets_inlined &&
+      bool deoptimize = !UseOnlyPolymorphicInliningWithNoDeopt() &&
+          all_targets_inlined &&
           (i != InlineCache::kIndividualCacheSize - 1) &&
           (classes->Get(i + 1) == nullptr);
 
-      if (outermost_graph_->IsCompilingOsr()) {
-        // We do not support HDeoptimize in OSR methods.
-        deoptimize = false;
-      }
       HInstruction* compare = AddTypeGuard(receiver,
                                            cursor,
                                            bb_cursor,
@@ -1123,7 +1162,7 @@ bool HInliner::TryInlinePolymorphicCallToSameTarget(
         graph_->GetArena(),
         compare,
         receiver,
-        HDeoptimize::Kind::kInline,
+        DeoptimizationKind::kJitSameTarget,
         invoke_instruction->GetDexPc());
     bb_cursor->InsertInstructionAfter(deoptimize, compare);
     deoptimize->CopyEnvironmentFrom(invoke_instruction->GetEnvironment());
@@ -1533,6 +1572,14 @@ HInstanceFieldSet* HInliner::CreateInstanceFieldSet(uint32_t field_index,
   return iput;
 }
 
+template <typename T>
+static inline Handle<T> NewHandleIfDifferent(T* object,
+                                             Handle<T> hint,
+                                             VariableSizedHandleScope* handles)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  return (object != hint.Get()) ? handles->NewHandle(object) : hint;
+}
+
 bool HInliner::TryBuildAndInlineHelper(HInvoke* invoke_instruction,
                                        ArtMethod* resolved_method,
                                        ReferenceTypeInfo receiver_type,
@@ -1544,9 +1591,13 @@ bool HInliner::TryBuildAndInlineHelper(HInvoke* invoke_instruction,
   const DexFile& callee_dex_file = *resolved_method->GetDexFile();
   uint32_t method_index = resolved_method->GetDexMethodIndex();
   ClassLinker* class_linker = caller_compilation_unit_.GetClassLinker();
-  Handle<mirror::DexCache> dex_cache(handles_->NewHandle(resolved_method->GetDexCache()));
-  Handle<mirror::ClassLoader> class_loader(handles_->NewHandle(
-      resolved_method->GetDeclaringClass()->GetClassLoader()));
+  Handle<mirror::DexCache> dex_cache = NewHandleIfDifferent(resolved_method->GetDexCache(),
+                                                            caller_compilation_unit_.GetDexCache(),
+                                                            handles_);
+  Handle<mirror::ClassLoader> class_loader =
+      NewHandleIfDifferent(resolved_method->GetDeclaringClass()->GetClassLoader(),
+                           caller_compilation_unit_.GetClassLoader(),
+                           handles_);
 
   DexCompilationUnit dex_compilation_unit(
       class_loader,
@@ -1558,25 +1609,6 @@ bool HInliner::TryBuildAndInlineHelper(HInvoke* invoke_instruction,
       resolved_method->GetAccessFlags(),
       /* verified_method */ nullptr,
       dex_cache);
-
-  bool requires_ctor_barrier = false;
-
-  if (dex_compilation_unit.IsConstructor()) {
-    // If it's a super invocation and we already generate a barrier there's no need
-    // to generate another one.
-    // We identify super calls by looking at the "this" pointer. If its value is the
-    // same as the local "this" pointer then we must have a super invocation.
-    bool is_super_invocation = invoke_instruction->InputAt(0)->IsParameterValue()
-        && invoke_instruction->InputAt(0)->AsParameterValue()->IsThis();
-    if (is_super_invocation && graph_->ShouldGenerateConstructorBarrier()) {
-      requires_ctor_barrier = false;
-    } else {
-      Thread* self = Thread::Current();
-      requires_ctor_barrier = compiler_driver_->RequiresConstructorBarrier(self,
-          dex_compilation_unit.GetDexFile(),
-          dex_compilation_unit.GetClassDefIndex());
-    }
-  }
 
   InvokeType invoke_type = invoke_instruction->GetInvokeType();
   if (invoke_type == kInterface) {
@@ -1590,7 +1622,6 @@ bool HInliner::TryBuildAndInlineHelper(HInvoke* invoke_instruction,
       graph_->GetArena(),
       callee_dex_file,
       method_index,
-      requires_ctor_barrier,
       compiler_driver_->GetInstructionSet(),
       invoke_type,
       graph_->IsDebuggable(),

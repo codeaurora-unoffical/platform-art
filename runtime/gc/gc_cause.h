@@ -33,6 +33,8 @@ enum GcCause {
   kGcCauseExplicit,
   // GC triggered for a native allocation.
   kGcCauseForNativeAlloc,
+  // Background GC triggered for a native allocation.
+  kGcCauseForNativeAllocBackground,
   // GC triggered for a collector transition.
   kGcCauseCollectorTransition,
   // Not a real GC cause, used when we disable moving GC (currently for GetPrimitiveArrayCritical).
@@ -57,6 +59,8 @@ enum GcCause {
   kGcCauseHprof,
   // Not a real GC cause, used to prevent GetObjectsAllocated running in the middle of GC.
   kGcCauseGetObjectsAllocated,
+  // GC cause for the profile saver.
+  kGcCauseProfileSaver,
 };
 
 const char* PrettyCause(GcCause cause);
