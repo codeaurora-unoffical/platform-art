@@ -1959,7 +1959,10 @@ inline void ConcurrentCopying::Process(mirror::Object* obj, MemberOffset offset)
   DCHECK_EQ(Thread::Current(), thread_running_gc_);
   mirror::Object* ref = obj->GetFieldObject<
       mirror::Object, kVerifyNone, kWithoutReadBarrier, false>(offset);
-  mirror::Object* to_ref = Mark</*kGrayImmuneObject*/false, /*kFromGCThread*/true>(ref);
+  mirror::Object* to_ref = Mark</*kGrayImmuneObject*/false, /*kFromGCThread*/true>(
+      ref,
+      /*holder*/ obj,
+      offset);
   if (to_ref == ref) {
     return;
   }
@@ -1972,8 +1975,11 @@ inline void ConcurrentCopying::Process(mirror::Object* obj, MemberOffset offset)
       // It was updated by the mutator.
       break;
     }
-  } while (!obj->CasFieldWeakRelaxedObjectWithoutWriteBarrier<
-      false, false, kVerifyNone>(offset, expected_ref, new_ref));
+    // Use release cas to make sure threads reading the reference see contents of copied objects.
+  } while (!obj->CasFieldWeakReleaseObjectWithoutWriteBarrier<false, false, kVerifyNone>(
+      offset,
+      expected_ref,
+      new_ref));
 }
 
 // Process some roots.

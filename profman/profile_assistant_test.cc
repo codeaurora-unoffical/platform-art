@@ -21,6 +21,7 @@
 #include "common_runtime_test.h"
 #include "exec_utils.h"
 #include "jit/profile_compilation_info.h"
+#include "linear_alloc.h"
 #include "mirror/class-inl.h"
 #include "obj_ptr-inl.h"
 #include "profile_assistant.h"
@@ -30,6 +31,11 @@
 namespace art {
 
 class ProfileAssistantTest : public CommonRuntimeTest {
+ public:
+  void PostRuntimeCreate() OVERRIDE {
+    arena_.reset(new ArenaAllocator(Runtime::Current()->GetArenaPool()));
+  }
+
  protected:
   void SetupProfile(const std::string& id,
                     uint32_t checksum,
@@ -66,38 +72,46 @@ class ProfileAssistantTest : public CommonRuntimeTest {
     ASSERT_TRUE(profile.GetFile()->ResetOffset());
   }
 
+  // Creates an inline cache which will be destructed at the end of the test.
+  ProfileCompilationInfo::InlineCacheMap* CreateInlineCacheMap() {
+    used_inline_caches.emplace_back(new ProfileCompilationInfo::InlineCacheMap(
+        std::less<uint16_t>(), arena_->Adapter(kArenaAllocProfile)));
+    return used_inline_caches.back().get();
+  }
+
   ProfileCompilationInfo::OfflineProfileMethodInfo GetOfflineProfileMethodInfo(
         const std::string& dex_location1, uint32_t dex_checksum1,
         const std::string& dex_location2, uint32_t dex_checksum2) {
-    ProfileCompilationInfo::OfflineProfileMethodInfo pmi;
+    ProfileCompilationInfo::InlineCacheMap* ic_map = CreateInlineCacheMap();
+    ProfileCompilationInfo::OfflineProfileMethodInfo pmi(ic_map);
     pmi.dex_references.emplace_back(dex_location1, dex_checksum1);
     pmi.dex_references.emplace_back(dex_location2, dex_checksum2);
 
     // Monomorphic
     for (uint16_t dex_pc = 0; dex_pc < 11; dex_pc++) {
-      ProfileCompilationInfo::DexPcData dex_pc_data;
+      ProfileCompilationInfo::DexPcData dex_pc_data(arena_.get());
       dex_pc_data.AddClass(0, dex::TypeIndex(0));
-      pmi.inline_caches.Put(dex_pc, dex_pc_data);
+      ic_map->Put(dex_pc, dex_pc_data);
     }
     // Polymorphic
     for (uint16_t dex_pc = 11; dex_pc < 22; dex_pc++) {
-      ProfileCompilationInfo::DexPcData dex_pc_data;
+      ProfileCompilationInfo::DexPcData dex_pc_data(arena_.get());
       dex_pc_data.AddClass(0, dex::TypeIndex(0));
       dex_pc_data.AddClass(1, dex::TypeIndex(1));
 
-      pmi.inline_caches.Put(dex_pc, dex_pc_data);
+      ic_map->Put(dex_pc, dex_pc_data);
     }
     // Megamorphic
     for (uint16_t dex_pc = 22; dex_pc < 33; dex_pc++) {
-      ProfileCompilationInfo::DexPcData dex_pc_data;
+      ProfileCompilationInfo::DexPcData dex_pc_data(arena_.get());
       dex_pc_data.SetIsMegamorphic();
-      pmi.inline_caches.Put(dex_pc, dex_pc_data);
+      ic_map->Put(dex_pc, dex_pc_data);
     }
     // Missing types
     for (uint16_t dex_pc = 33; dex_pc < 44; dex_pc++) {
-      ProfileCompilationInfo::DexPcData dex_pc_data;
+      ProfileCompilationInfo::DexPcData dex_pc_data(arena_.get());
       dex_pc_data.SetIsMissingTypes();
-      pmi.inline_caches.Put(dex_pc, dex_pc_data);
+      ic_map->Put(dex_pc, dex_pc_data);
     }
 
     return pmi;
@@ -247,13 +261,13 @@ class ProfileAssistantTest : public CommonRuntimeTest {
                           bool is_megamorphic,
                           bool is_missing_types)
       REQUIRES_SHARED(Locks::mutator_lock_) {
-    ProfileCompilationInfo::OfflineProfileMethodInfo pmi;
-    ASSERT_TRUE(info.GetMethod(method->GetDexFile()->GetLocation(),
-                               method->GetDexFile()->GetLocationChecksum(),
-                               method->GetDexMethodIndex(),
-                               &pmi));
-    ASSERT_EQ(pmi.inline_caches.size(), 1u);
-    ProfileCompilationInfo::DexPcData dex_pc_data = pmi.inline_caches.begin()->second;
+    std::unique_ptr<ProfileCompilationInfo::OfflineProfileMethodInfo> pmi =
+        info.GetMethod(method->GetDexFile()->GetLocation(),
+                       method->GetDexFile()->GetLocationChecksum(),
+                       method->GetDexMethodIndex());
+    ASSERT_TRUE(pmi != nullptr);
+    ASSERT_EQ(pmi->inline_caches->size(), 1u);
+    const ProfileCompilationInfo::DexPcData& dex_pc_data = pmi->inline_caches->begin()->second;
 
     ASSERT_EQ(dex_pc_data.is_megamorphic, is_megamorphic);
     ASSERT_EQ(dex_pc_data.is_missing_types, is_missing_types);
@@ -262,7 +276,7 @@ class ProfileAssistantTest : public CommonRuntimeTest {
     for (mirror::Class* it : expected_clases) {
       for (const auto& class_ref : dex_pc_data.classes) {
         ProfileCompilationInfo::DexReference dex_ref =
-            pmi.dex_references[class_ref.dex_profile_index];
+            pmi->dex_references[class_ref.dex_profile_index];
         if (dex_ref.MatchesDex(&(it->GetDexFile())) &&
             class_ref.type_index == it->GetDexTypeIndex()) {
           found++;
@@ -272,6 +286,13 @@ class ProfileAssistantTest : public CommonRuntimeTest {
 
     ASSERT_EQ(expected_clases.size(), found);
   }
+
+  std::unique_ptr<ArenaAllocator> arena_;
+
+  // Cache of inline caches generated during tests.
+  // This makes it easier to pass data between different utilities and ensure that
+  // caches are destructed at the end of the test.
+  std::vector<std::unique_ptr<ProfileCompilationInfo::InlineCacheMap>> used_inline_caches;
 };
 
 TEST_F(ProfileAssistantTest, AdviseCompilationEmptyReferences) {
@@ -541,11 +562,11 @@ TEST_F(ProfileAssistantTest, TestProfileCreationGenerateMethods) {
   for (ArtMethod& method : klass->GetMethods(kRuntimePointerSize)) {
     if (!method.IsCopied() && method.GetCodeItem() != nullptr) {
       ++method_count;
-      ProfileCompilationInfo::OfflineProfileMethodInfo pmi;
-      ASSERT_TRUE(info.GetMethod(method.GetDexFile()->GetLocation(),
-                                 method.GetDexFile()->GetLocationChecksum(),
-                                 method.GetDexMethodIndex(),
-                                 &pmi));
+      std::unique_ptr<ProfileCompilationInfo::OfflineProfileMethodInfo> pmi =
+          info.GetMethod(method.GetDexFile()->GetLocation(),
+                         method.GetDexFile()->GetLocationChecksum(),
+                         method.GetDexMethodIndex());
+      ASSERT_TRUE(pmi != nullptr);
     }
   }
   EXPECT_GT(method_count, 0u);
@@ -689,12 +710,12 @@ TEST_F(ProfileAssistantTest, TestProfileCreateInlineCache) {
     // Verify that method noInlineCache has no inline caches in the profile.
     ArtMethod* no_inline_cache = GetVirtualMethod(class_loader, "LTestInline;", "noInlineCache");
     ASSERT_TRUE(no_inline_cache != nullptr);
-    ProfileCompilationInfo::OfflineProfileMethodInfo pmi_no_inline_cache;
-    ASSERT_TRUE(info.GetMethod(no_inline_cache->GetDexFile()->GetLocation(),
-                               no_inline_cache->GetDexFile()->GetLocationChecksum(),
-                               no_inline_cache->GetDexMethodIndex(),
-                               &pmi_no_inline_cache));
-    ASSERT_TRUE(pmi_no_inline_cache.inline_caches.empty());
+    std::unique_ptr<ProfileCompilationInfo::OfflineProfileMethodInfo> pmi_no_inline_cache =
+        info.GetMethod(no_inline_cache->GetDexFile()->GetLocation(),
+                       no_inline_cache->GetDexFile()->GetLocationChecksum(),
+                       no_inline_cache->GetDexMethodIndex());
+    ASSERT_TRUE(pmi_no_inline_cache != nullptr);
+    ASSERT_TRUE(pmi_no_inline_cache->inline_caches->empty());
   }
 }
 
@@ -736,6 +757,65 @@ TEST_F(ProfileAssistantTest, MergeProfilesWithDifferentDexOrder) {
 
   // The information from profile must remain the same.
   CheckProfileInfo(profile1, info1);
+}
+
+TEST_F(ProfileAssistantTest, TestProfileCreateWithInvalidData) {
+  // Create the profile content.
+  std::vector<std::string> profile_methods = {
+    "LTestInline;->inlineMonomorphic(LSuper;)I+invalid_class",
+    "LTestInline;->invalid_method",
+    "invalid_class"
+  };
+  std::string input_file_contents;
+  for (std::string& m : profile_methods) {
+    input_file_contents += m + std::string("\n");
+  }
+
+  // Create the profile and save it to disk.
+  ScratchFile profile_file;
+  std::string dex_filename = GetTestDexFileName("ProfileTestMultiDex");
+  ASSERT_TRUE(CreateProfile(input_file_contents,
+                            profile_file.GetFilename(),
+                            dex_filename));
+
+  // Load the profile from disk.
+  ProfileCompilationInfo info;
+  profile_file.GetFile()->ResetOffset();
+  ASSERT_TRUE(info.Load(GetFd(profile_file)));
+
+  // Load the dex files and verify that the profile contains the expected methods info.
+  ScopedObjectAccess soa(Thread::Current());
+  jobject class_loader = LoadDex("ProfileTestMultiDex");
+  ASSERT_NE(class_loader, nullptr);
+
+  ArtMethod* inline_monomorphic = GetVirtualMethod(class_loader,
+                                                   "LTestInline;",
+                                                   "inlineMonomorphic");
+  const DexFile* dex_file = inline_monomorphic->GetDexFile();
+
+  // Verify that the inline cache contains the invalid type.
+  std::unique_ptr<ProfileCompilationInfo::OfflineProfileMethodInfo> pmi =
+      info.GetMethod(dex_file->GetLocation(),
+                     dex_file->GetLocationChecksum(),
+                     inline_monomorphic->GetDexMethodIndex());
+  ASSERT_TRUE(pmi != nullptr);
+  ASSERT_EQ(pmi->inline_caches->size(), 1u);
+  const ProfileCompilationInfo::DexPcData& dex_pc_data = pmi->inline_caches->begin()->second;
+  dex::TypeIndex invalid_class_index(std::numeric_limits<uint16_t>::max() - 1);
+  ASSERT_EQ(1u, dex_pc_data.classes.size());
+  ASSERT_EQ(invalid_class_index, dex_pc_data.classes.begin()->type_index);
+
+  // Verify that the start-up classes contain the invalid class.
+  std::set<dex::TypeIndex> classes;
+  std::set<uint16_t> methods;
+  ASSERT_TRUE(info.GetClassesAndMethods(*dex_file, &classes, &methods));
+  ASSERT_EQ(1u, classes.size());
+  ASSERT_TRUE(classes.find(invalid_class_index) != classes.end());
+
+  // Verify that the invalid method is in the profile.
+  ASSERT_EQ(2u, methods.size());
+  uint16_t invalid_method_index = std::numeric_limits<uint16_t>::max() - 1;
+  ASSERT_TRUE(methods.find(invalid_method_index) != methods.end());
 }
 
 }  // namespace art

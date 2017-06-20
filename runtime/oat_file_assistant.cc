@@ -239,7 +239,7 @@ OatFileAssistant::MakeUpToDate(bool profile_changed, std::string* error_msg) {
     case kDex2OatForBootImage:
     case kDex2OatForRelocation:
     case kDex2OatForFilter:
-      return GenerateOatFileNoChecks(info, error_msg);
+      return GenerateOatFileNoChecks(info, target, error_msg);
   }
   UNREACHABLE();
 }
@@ -614,7 +614,7 @@ static bool PrepareOdexDirectories(const std::string& dex_location,
 }
 
 OatFileAssistant::ResultOfAttemptToUpdate OatFileAssistant::GenerateOatFileNoChecks(
-      OatFileAssistant::OatFileInfo& info, std::string* error_msg) {
+      OatFileAssistant::OatFileInfo& info, CompilerFilter::Filter filter, std::string* error_msg) {
   CHECK(error_msg != nullptr);
 
   Runtime* runtime = Runtime::Current();
@@ -630,7 +630,7 @@ OatFileAssistant::ResultOfAttemptToUpdate OatFileAssistant::GenerateOatFileNoChe
     return kUpdateNotAttempted;
   }
   const std::string& oat_file_name = *info.Filename();
-  const std::string& vdex_file_name = ReplaceFileExtension(oat_file_name, "vdex");
+  const std::string& vdex_file_name = GetVdexFilename(oat_file_name);
 
   // dex2oat ignores missing dex files and doesn't report an error.
   // Check explicitly here so we can detect the error properly.
@@ -689,6 +689,7 @@ OatFileAssistant::ResultOfAttemptToUpdate OatFileAssistant::GenerateOatFileNoChe
   args.push_back("--output-vdex-fd=" + std::to_string(vdex_file->Fd()));
   args.push_back("--oat-fd=" + std::to_string(oat_file->Fd()));
   args.push_back("--oat-location=" + oat_file_name);
+  args.push_back("--compiler-filter=" + CompilerFilter::NameOfFilter(filter));
 
   if (!Dex2Oat(args, error_msg)) {
     // Manually delete the oat and vdex files. This ensures there is no garbage
@@ -962,7 +963,7 @@ OatFileAssistant::OatStatus OatFileAssistant::OatFileInfo::Status() {
     if (file == nullptr) {
       // Check to see if there is a vdex file we can make use of.
       std::string error_msg;
-      std::string vdex_filename = ReplaceFileExtension(filename_, "vdex");
+      std::string vdex_filename = GetVdexFilename(filename_);
       std::unique_ptr<VdexFile> vdex = VdexFile::Open(vdex_filename,
                                                       /*writeable*/false,
                                                       /*low_4gb*/false,

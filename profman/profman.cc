@@ -143,6 +143,8 @@ static constexpr uint16_t kDefaultTestProfileClassRatio = 5;
 // Separators used when parsing human friendly representation of profiles.
 static const std::string kMethodSep = "->";
 static const std::string kMissingTypesMarker = "missing_types";
+static const std::string kInvalidClassDescriptor = "invalid_class";
+static const std::string kInvalidMethod = "invalid_method";
 static const std::string kClassAllMethods = "*";
 static constexpr char kProfileParsingInlineChacheSep = '+';
 static constexpr char kProfileParsingTypeSep = ',';
@@ -423,15 +425,13 @@ class ProfMan FINAL {
     }
     for (const std::unique_ptr<const DexFile>& dex_file : *dex_files) {
       std::set<dex::TypeIndex> class_types;
-      ProfileCompilationInfo::MethodMap methods;
-      if (profile_info.GetClassesAndMethods(dex_file.get(), &class_types, &methods)) {
+      std::set<uint16_t> methods;
+      if (profile_info.GetClassesAndMethods(*dex_file.get(), &class_types, &methods)) {
         for (const dex::TypeIndex& type_index : class_types) {
           const DexFile::TypeId& type_id = dex_file->GetTypeId(type_index);
           out_lines->insert(std::string(dex_file->GetTypeDescriptor(type_id)));
         }
-        for (const auto& pair : methods) {
-          // TODO: Process inline caches.
-          const uint16_t dex_method_idx = pair.first;
+        for (uint16_t dex_method_idx : methods) {
           const DexFile::MethodId& id = dex_file->GetMethodId(dex_method_idx);
           std::string signature_string(dex_file->GetMethodSignature(id).ToString());
           std::string type_string(dex_file->GetTypeDescriptor(dex_file->GetTypeId(id.class_idx_)));
@@ -563,8 +563,23 @@ class ProfMan FINAL {
   bool FindClass(const std::vector<std::unique_ptr<const DexFile>>& dex_files,
                  const std::string& klass_descriptor,
                  /*out*/ProfileMethodInfo::ProfileClassReference* class_ref) {
+    constexpr uint16_t kInvalidTypeIndex = std::numeric_limits<uint16_t>::max() - 1;
     for (const std::unique_ptr<const DexFile>& dex_file_ptr : dex_files) {
       const DexFile* dex_file = dex_file_ptr.get();
+      if (klass_descriptor == kInvalidClassDescriptor) {
+        if (kInvalidTypeIndex >= dex_file->NumTypeIds()) {
+          // The dex file does not contain all possible type ids which leaves us room
+          // to add an "invalid" type id.
+          class_ref->dex_file = dex_file;
+          class_ref->type_index = dex::TypeIndex(kInvalidTypeIndex);
+          return true;
+        } else {
+          // The dex file contains all possible type ids. We don't have any free type id
+          // that we can use as invalid.
+          continue;
+        }
+      }
+
       const DexFile::TypeId* type_id = dex_file->FindTypeId(klass_descriptor.c_str());
       if (type_id == nullptr) {
         continue;
@@ -584,14 +599,23 @@ class ProfMan FINAL {
   // Find the method specified by method_spec in the class class_ref.
   uint32_t FindMethodIndex(const ProfileMethodInfo::ProfileClassReference& class_ref,
                            const std::string& method_spec) {
+    const DexFile* dex_file = class_ref.dex_file;
+    if (method_spec == kInvalidMethod) {
+      constexpr uint16_t kInvalidMethodIndex = std::numeric_limits<uint16_t>::max() - 1;
+      return kInvalidMethodIndex >= dex_file->NumMethodIds()
+             ? kInvalidMethodIndex
+             : DexFile::kDexNoIndex;
+    }
+
     std::vector<std::string> name_and_signature;
     Split(method_spec, kProfileParsingFirstCharInSignature, &name_and_signature);
     if (name_and_signature.size() != 2) {
       LOG(ERROR) << "Invalid method name and signature " << method_spec;
+      return DexFile::kDexNoIndex;
     }
+
     const std::string& name = name_and_signature[0];
     const std::string& signature = kProfileParsingFirstCharInSignature + name_and_signature[1];
-    const DexFile* dex_file = class_ref.dex_file;
 
     const DexFile::StringId* name_id = dex_file->FindStringId(name.c_str());
     if (name_id == nullptr) {
@@ -657,9 +681,12 @@ class ProfMan FINAL {
   // The possible line formats are:
   // "LJustTheCass;".
   // "LTestInline;->inlinePolymorphic(LSuper;)I+LSubA;,LSubB;,LSubC;".
+  // "LTestInline;->inlinePolymorphic(LSuper;)I+LSubA;,LSubB;,invalid_class".
   // "LTestInline;->inlineMissingTypes(LSuper;)I+missing_types".
   // "LTestInline;->inlineNoInlineCaches(LSuper;)I".
   // "LTestInline;->*".
+  // "invalid_class".
+  // "LTestInline;->invalid_method".
   // The method and classes are searched only in the given dex files.
   bool ProcessLine(const std::vector<std::unique_ptr<const DexFile>>& dex_files,
                    const std::string& line,
