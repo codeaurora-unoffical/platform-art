@@ -207,6 +207,13 @@ class OatFileAssistant {
   static std::vector<std::unique_ptr<const DexFile>> LoadDexFiles(
       const OatFile& oat_file, const char* dex_location);
 
+  // Same as `std::vector<std::unique_ptr<const DexFile>> LoadDexFiles(...)` with the difference:
+  //   - puts the dex files in the given vector
+  //   - returns whether or not all dex files were successfully opened
+  static bool LoadDexFiles(const OatFile& oat_file,
+                           const std::string& dex_location,
+                           std::vector<std::unique_ptr<const DexFile>>* out_dex_files);
+
   // Returns true if there are dex files in the original dex location that can
   // be compiled with dex2oat for this dex location.
   // Returns false if there is no original dex file, or if the original dex
@@ -366,14 +373,16 @@ class OatFileAssistant {
   };
 
   // Generate the oat file for the given info from the dex file using the
-  // current runtime compiler options.
+  // current runtime compiler options and the specified filter.
   // This does not check the current status before attempting to generate the
   // oat file.
   //
   // If the result is not kUpdateSucceeded, the value of error_msg will be set
   // to a string describing why there was a failure or the update was not
   // attempted. error_msg must not be null.
-  ResultOfAttemptToUpdate GenerateOatFileNoChecks(OatFileInfo& info, std::string* error_msg);
+  ResultOfAttemptToUpdate GenerateOatFileNoChecks(OatFileInfo& info,
+                                                  CompilerFilter::Filter target,
+                                                  std::string* error_msg);
 
   // Return info for the best oat file.
   OatFileInfo& GetBestInfo();

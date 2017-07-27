@@ -24,6 +24,7 @@
 #include "android-base/strings.h"
 
 #include "base/logging.h"
+#include "base/stl_util.h"
 #include "compiler_filter.h"
 #include "class_linker.h"
 #include "exec_utils.h"
@@ -140,8 +141,8 @@ OatFileAssistant::OatFileAssistant(const char* dex_location,
 
 OatFileAssistant::~OatFileAssistant() {
   // Clean up the lock file.
-  if (flock_.HasFile()) {
-    unlink(flock_.GetFile()->GetPath().c_str());
+  if (flock_.get() != nullptr) {
+    unlink(flock_->GetPath().c_str());
   }
 }
 
@@ -164,7 +165,7 @@ bool OatFileAssistant::IsInBootClassPath() {
 
 bool OatFileAssistant::Lock(std::string* error_msg) {
   CHECK(error_msg != nullptr);
-  CHECK(!flock_.HasFile()) << "OatFileAssistant::Lock already acquired";
+  CHECK(flock_.get() == nullptr) << "OatFileAssistant::Lock already acquired";
 
   // Note the lock will only succeed for secondary dex files and in test
   // environment.
@@ -178,7 +179,8 @@ bool OatFileAssistant::Lock(std::string* error_msg) {
   // to generate oat files anyway.
   std::string lock_file_name = dex_location_ + "." + GetInstructionSetString(isa_) + ".flock";
 
-  if (!flock_.Init(lock_file_name.c_str(), error_msg)) {
+  flock_ = LockedFile::Open(lock_file_name.c_str(), error_msg);
+  if (flock_.get() == nullptr) {
     unlink(lock_file_name.c_str());
     return false;
   }
@@ -239,7 +241,7 @@ OatFileAssistant::MakeUpToDate(bool profile_changed, std::string* error_msg) {
     case kDex2OatForBootImage:
     case kDex2OatForRelocation:
     case kDex2OatForFilter:
-      return GenerateOatFileNoChecks(info, error_msg);
+      return GenerateOatFileNoChecks(info, target, error_msg);
   }
   UNREACHABLE();
 }
@@ -296,28 +298,38 @@ std::string OatFileAssistant::GetStatusDump() {
 }
 
 std::vector<std::unique_ptr<const DexFile>> OatFileAssistant::LoadDexFiles(
-    const OatFile& oat_file, const char* dex_location) {
+    const OatFile &oat_file, const char *dex_location) {
   std::vector<std::unique_ptr<const DexFile>> dex_files;
+  if (LoadDexFiles(oat_file, dex_location, &dex_files)) {
+    return dex_files;
+  } else {
+    return std::vector<std::unique_ptr<const DexFile>>();
+  }
+}
 
+bool OatFileAssistant::LoadDexFiles(
+    const OatFile &oat_file,
+    const std::string& dex_location,
+    std::vector<std::unique_ptr<const DexFile>>* out_dex_files) {
   // Load the main dex file.
   std::string error_msg;
   const OatFile::OatDexFile* oat_dex_file = oat_file.GetOatDexFile(
-      dex_location, nullptr, &error_msg);
+      dex_location.c_str(), nullptr, &error_msg);
   if (oat_dex_file == nullptr) {
     LOG(WARNING) << error_msg;
-    return std::vector<std::unique_ptr<const DexFile>>();
+    return false;
   }
 
   std::unique_ptr<const DexFile> dex_file = oat_dex_file->OpenDexFile(&error_msg);
   if (dex_file.get() == nullptr) {
     LOG(WARNING) << "Failed to open dex file from oat dex file: " << error_msg;
-    return std::vector<std::unique_ptr<const DexFile>>();
+    return false;
   }
-  dex_files.push_back(std::move(dex_file));
+  out_dex_files->push_back(std::move(dex_file));
 
   // Load the rest of the multidex entries
-  for (size_t i = 1; ; i++) {
-    std::string multidex_dex_location = DexFile::GetMultiDexLocation(i, dex_location);
+  for (size_t i = 1;; i++) {
+    std::string multidex_dex_location = DexFile::GetMultiDexLocation(i, dex_location.c_str());
     oat_dex_file = oat_file.GetOatDexFile(multidex_dex_location.c_str(), nullptr);
     if (oat_dex_file == nullptr) {
       // There are no more multidex entries to load.
@@ -327,11 +339,11 @@ std::vector<std::unique_ptr<const DexFile>> OatFileAssistant::LoadDexFiles(
     dex_file = oat_dex_file->OpenDexFile(&error_msg);
     if (dex_file.get() == nullptr) {
       LOG(WARNING) << "Failed to open dex file from oat dex file: " << error_msg;
-      return std::vector<std::unique_ptr<const DexFile>>();
+      return false;
     }
-    dex_files.push_back(std::move(dex_file));
+    out_dex_files->push_back(std::move(dex_file));
   }
-  return dex_files;
+  return true;
 }
 
 bool OatFileAssistant::HasOriginalDexFiles() {
@@ -614,7 +626,7 @@ static bool PrepareOdexDirectories(const std::string& dex_location,
 }
 
 OatFileAssistant::ResultOfAttemptToUpdate OatFileAssistant::GenerateOatFileNoChecks(
-      OatFileAssistant::OatFileInfo& info, std::string* error_msg) {
+      OatFileAssistant::OatFileInfo& info, CompilerFilter::Filter filter, std::string* error_msg) {
   CHECK(error_msg != nullptr);
 
   Runtime* runtime = Runtime::Current();
@@ -689,6 +701,7 @@ OatFileAssistant::ResultOfAttemptToUpdate OatFileAssistant::GenerateOatFileNoChe
   args.push_back("--output-vdex-fd=" + std::to_string(vdex_file->Fd()));
   args.push_back("--oat-fd=" + std::to_string(oat_file->Fd()));
   args.push_back("--oat-location=" + oat_file_name);
+  args.push_back("--compiler-filter=" + CompilerFilter::NameOfFilter(filter));
 
   if (!Dex2Oat(args, error_msg)) {
     // Manually delete the oat and vdex files. This ensures there is no garbage
