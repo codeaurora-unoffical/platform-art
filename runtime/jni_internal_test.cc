@@ -24,8 +24,8 @@
 #include "java_vm_ext.h"
 #include "jni_env_ext.h"
 #include "mirror/string-inl.h"
+#include "nativehelper/ScopedLocalRef.h"
 #include "scoped_thread_state_change-inl.h"
-#include "ScopedLocalRef.h"
 
 namespace art {
 
@@ -626,9 +626,9 @@ class JniInternalTest : public CommonCompilerTest {
             hs.NewHandle(soa.Decode<mirror::ClassLoader>(class_loader_)));
         mirror::Class* c = class_linker_->FindClass(soa.Self(), "LMyClassNatives;", loader);
         const auto pointer_size = class_linker_->GetImagePointerSize();
-        ArtMethod* method = direct ? c->FindDirectMethod(method_name, method_sig, pointer_size) :
-            c->FindVirtualMethod(method_name, method_sig, pointer_size);
+        ArtMethod* method = c->FindClassMethod(method_name, method_sig, pointer_size);
         ASSERT_TRUE(method != nullptr) << method_name << " " << method_sig;
+        ASSERT_EQ(direct, method->IsDirect());
         method->SetEntryPointFromQuickCompiledCode(class_linker_->GetRuntimeQuickGenericJniStub());
       }
       // Start runtime.

@@ -34,12 +34,12 @@
 #include "class_linker-inl.h"
 #include "dex_file-inl.h"
 #include "fault_handler.h"
-#include "gc_root.h"
 #include "gc/accounting/card_table-inl.h"
+#include "gc_root.h"
 #include "indirect_reference_table-inl.h"
 #include "interpreter/interpreter.h"
-#include "jni_env_ext.h"
 #include "java_vm_ext.h"
+#include "jni_env_ext.h"
 #include "jvalue-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_loader.h"
@@ -49,12 +49,12 @@
 #include "mirror/object_array-inl.h"
 #include "mirror/string-inl.h"
 #include "mirror/throwable.h"
+#include "nativehelper/ScopedLocalRef.h"
 #include "parsed_options.h"
 #include "reflection.h"
 #include "runtime.h"
 #include "safe_map.h"
 #include "scoped_thread_state_change-inl.h"
-#include "ScopedLocalRef.h"
 #include "thread.h"
 #include "utf.h"
 #include "well_known_classes.h"
@@ -233,17 +233,10 @@ static jmethodID FindMethodID(ScopedObjectAccess& soa, jclass jni_class,
   }
   ArtMethod* method = nullptr;
   auto pointer_size = Runtime::Current()->GetClassLinker()->GetImagePointerSize();
-  if (is_static) {
-    method = c->FindDirectMethod(name, sig, pointer_size);
-  } else if (c->IsInterface()) {
+  if (c->IsInterface()) {
     method = c->FindInterfaceMethod(name, sig, pointer_size);
   } else {
-    method = c->FindVirtualMethod(name, sig, pointer_size);
-    if (method == nullptr) {
-      // No virtual method matching the signature.  Search declared
-      // private methods and constructors.
-      method = c->FindDeclaredDirectMethod(name, sig, pointer_size);
-    }
+    method = c->FindClassMethod(name, sig, pointer_size);
   }
   if (method == nullptr || method->IsStatic() != is_static) {
     ThrowNoSuchMethodError(soa, c, name, sig, is_static ? "static" : "non-static");

@@ -84,9 +84,10 @@ class ImageTest : public CommonCompilerTest {
 
   void SetUpRuntimeOptions(RuntimeOptions* options) OVERRIDE {
     CommonCompilerTest::SetUpRuntimeOptions(options);
-    callbacks_.reset(new QuickCompilerCallbacks(
-        verification_results_.get(),
-        CompilerCallbacks::CallbackMode::kCompileBootImage));
+    QuickCompilerCallbacks* new_callbacks =
+        new QuickCompilerCallbacks(CompilerCallbacks::CallbackMode::kCompileBootImage);
+    new_callbacks->SetVerificationResults(verification_results_.get());
+    callbacks_.reset(new_callbacks);
     options->push_back(std::make_pair("compilercallbacks", callbacks_.get()));
   }
 
@@ -213,7 +214,8 @@ inline void CompilationHelper::Compile(CompilerDriver* driver,
                                                       /*compile_app_image*/false,
                                                       storage_mode,
                                                       oat_filename_vector,
-                                                      dex_file_to_oat_index_map));
+                                                      dex_file_to_oat_index_map,
+                                                      /*dirty_image_objects*/nullptr));
   {
     {
       jobject class_loader = nullptr;

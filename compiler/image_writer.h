@@ -75,7 +75,8 @@ class ImageWriter FINAL {
               bool compile_app_image,
               ImageHeader::StorageMode image_storage_mode,
               const std::vector<const char*>& oat_filenames,
-              const std::unordered_map<const DexFile*, size_t>& dex_file_oat_index_map);
+              const std::unordered_map<const DexFile*, size_t>& dex_file_oat_index_map,
+              const std::unordered_set<std::string>* dirty_image_objects);
 
   bool PrepareImageAddressSpace();
 
@@ -159,6 +160,7 @@ class ImageWriter FINAL {
   // Classify different kinds of bins that objects end up getting packed into during image writing.
   // Ordered from dirtiest to cleanest (until ArtMethods).
   enum Bin {
+    kBinKnownDirty,               // Known dirty objects from --dirty-image-objects list
     kBinMiscDirty,                // Dex caches, object locks, etc...
     kBinClassVerified,            // Class verified, but initializers haven't been run
     // Unknown mix of clean/dirty:
@@ -397,8 +399,6 @@ class ImageWriter FINAL {
 
   // Verify unwanted classes removed.
   void CheckNonImageClassesRemoved() REQUIRES_SHARED(Locks::mutator_lock_);
-  static void CheckNonImageClassesRemovedCallback(mirror::Object* obj, void* arg)
-      REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Lays out where the image objects will be at runtime.
   void CalculateNewObjectOffsets()
@@ -414,18 +414,9 @@ class ImageWriter FINAL {
   void UnbinObjectsIntoOffset(mirror::Object* obj)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  static void EnsureBinSlotAssignedCallback(mirror::Object* obj, void* arg)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-  static void DeflateMonitorCallback(mirror::Object* obj, void* arg)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-  static void UnbinObjectsIntoOffsetCallback(mirror::Object* obj, void* arg)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
   // Creates the contiguous image in memory and adjusts pointers.
   void CopyAndFixupNativeData(size_t oat_index) REQUIRES_SHARED(Locks::mutator_lock_);
   void CopyAndFixupObjects() REQUIRES_SHARED(Locks::mutator_lock_);
-  static void CopyAndFixupObjectsCallback(mirror::Object* obj, void* arg)
-      REQUIRES_SHARED(Locks::mutator_lock_);
   void CopyAndFixupObject(mirror::Object* obj) REQUIRES_SHARED(Locks::mutator_lock_);
   void CopyAndFixupMethod(ArtMethod* orig, ArtMethod* copy, const ImageInfo& image_info)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -484,7 +475,7 @@ class ImageWriter FINAL {
   // early_exit is true if we had a cyclic dependency anywhere down the chain.
   bool PruneAppImageClassInternal(ObjPtr<mirror::Class> klass,
                                   bool* early_exit,
-                                  std::unordered_set<mirror::Class*>* visited)
+                                  std::unordered_set<mirror::Object*>* visited)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool IsMultiImage() const {
@@ -610,6 +601,9 @@ class ImageWriter FINAL {
   // Map of dex files to the indexes of oat files that they were compiled into.
   const std::unordered_map<const DexFile*, size_t>& dex_file_oat_index_map_;
 
+  // Set of objects known to be dirty in the image. Can be nullptr if there are none.
+  const std::unordered_set<std::string>* dirty_image_objects_;
+
   class ComputeLazyFieldsForClassesVisitor;
   class FixupClassVisitor;
   class FixupRootVisitor;
@@ -621,6 +615,7 @@ class ImageWriter FINAL {
   class PruneClassLoaderClassesVisitor;
   class RegisterBootClassPathClassesVisitor;
   class VisitReferencesVisitor;
+  class PruneObjectReferenceVisitor;
 
   DISALLOW_COPY_AND_ASSIGN(ImageWriter);
 };

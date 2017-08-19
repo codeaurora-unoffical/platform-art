@@ -239,12 +239,13 @@ class OatWriter {
     return ArrayRef<const debug::MethodDebugInfo>(method_info_);
   }
 
-  const CompilerDriver* GetCompilerDriver() {
+  const CompilerDriver* GetCompilerDriver() const {
     return compiler_driver_;
   }
 
  private:
   class DexFileSource;
+  class OatClassHeader;
   class OatClass;
   class OatDexFile;
 
@@ -265,6 +266,7 @@ class OatWriter {
   class WriteMapMethodVisitor;
   class WriteMethodInfoVisitor;
   class WriteQuickeningInfoMethodVisitor;
+  class WriteQuickeningIndicesMethodVisitor;
 
   // Visit all the methods in all the compiled dex files in their definition order
   // with a given DexMethodVisitor.
@@ -322,10 +324,14 @@ class OatWriter {
   bool ValidateDexFileHeader(const uint8_t* raw_header, const char* location);
   bool WriteTypeLookupTables(OutputStream* oat_rodata,
                              const std::vector<std::unique_ptr<const DexFile>>& opened_dex_files);
+  bool WriteDexLayoutSections(OutputStream* oat_rodata,
+                              const std::vector<std::unique_ptr<const DexFile>>& opened_dex_files);
   bool WriteCodeAlignment(OutputStream* out, uint32_t aligned_code_delta);
   bool WriteUpTo16BytesAlignment(OutputStream* out, uint32_t size, uint32_t* stat);
   void SetMultiOatRelativePatcherAdjustment();
   void CloseSources();
+
+  bool MayHaveCompiledMethods() const;
 
   enum class WriteState {
     kAddingDexFileSources,
@@ -410,6 +416,7 @@ class OatWriter {
   // data to write
   std::unique_ptr<OatHeader> oat_header_;
   dchecked_vector<OatDexFile> oat_dex_files_;
+  dchecked_vector<OatClassHeader> oat_class_headers_;
   dchecked_vector<OatClass> oat_classes_;
   std::unique_ptr<const std::vector<uint8_t>> jni_dlsym_lookup_;
   std::unique_ptr<const std::vector<uint8_t>> quick_generic_jni_trampoline_;
@@ -450,6 +457,9 @@ class OatWriter {
   uint32_t size_oat_dex_file_offset_;
   uint32_t size_oat_dex_file_class_offsets_offset_;
   uint32_t size_oat_dex_file_lookup_table_offset_;
+  uint32_t size_oat_dex_file_dex_layout_sections_offset_;
+  uint32_t size_oat_dex_file_dex_layout_sections_;
+  uint32_t size_oat_dex_file_dex_layout_sections_alignment_;
   uint32_t size_oat_dex_file_method_bss_mapping_offset_;
   uint32_t size_oat_lookup_table_alignment_;
   uint32_t size_oat_lookup_table_;

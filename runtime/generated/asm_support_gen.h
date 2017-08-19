@@ -48,7 +48,7 @@ DEFINE_CHECK_EQ(static_cast<int32_t>(CODEITEM_INSNS_OFFSET), (static_cast<int32_
 DEFINE_CHECK_EQ(static_cast<int32_t>(MIRROR_OBJECT_CLASS_OFFSET), (static_cast<int32_t>(art::mirror::Object:: ClassOffset().Int32Value())))
 #define MIRROR_OBJECT_LOCK_WORD_OFFSET 4
 DEFINE_CHECK_EQ(static_cast<int32_t>(MIRROR_OBJECT_LOCK_WORD_OFFSET), (static_cast<int32_t>(art::mirror::Object:: MonitorOffset().Int32Value())))
-#define MIRROR_CLASS_STATUS_INITIALIZED 0xa
+#define MIRROR_CLASS_STATUS_INITIALIZED 0xb
 DEFINE_CHECK_EQ(static_cast<uint32_t>(MIRROR_CLASS_STATUS_INITIALIZED), (static_cast<uint32_t>((art::mirror::Class::kStatusInitialized))))
 #define ACCESS_FLAGS_CLASS_IS_FINALIZABLE 0x80000000
 DEFINE_CHECK_EQ(static_cast<uint32_t>(ACCESS_FLAGS_CLASS_IS_FINALIZABLE), (static_cast<uint32_t>((art::kAccClassIsFinalizable))))
@@ -78,6 +78,10 @@ DEFINE_CHECK_EQ(static_cast<int32_t>(STRING_DEX_CACHE_SIZE_MINUS_ONE), (static_c
 DEFINE_CHECK_EQ(static_cast<int32_t>(STRING_DEX_CACHE_HASH_BITS), (static_cast<int32_t>(art::LeastSignificantBit(art::mirror::DexCache::kDexCacheStringCacheSize))))
 #define STRING_DEX_CACHE_ELEMENT_SIZE 8
 DEFINE_CHECK_EQ(static_cast<int32_t>(STRING_DEX_CACHE_ELEMENT_SIZE), (static_cast<int32_t>(sizeof(art::mirror::StringDexCachePair))))
+#define METHOD_DEX_CACHE_SIZE_MINUS_ONE 1023
+DEFINE_CHECK_EQ(static_cast<int32_t>(METHOD_DEX_CACHE_SIZE_MINUS_ONE), (static_cast<int32_t>(art::mirror::DexCache::kDexCacheMethodCacheSize - 1)))
+#define METHOD_DEX_CACHE_HASH_BITS 10
+DEFINE_CHECK_EQ(static_cast<int32_t>(METHOD_DEX_CACHE_HASH_BITS), (static_cast<int32_t>(art::LeastSignificantBit(art::mirror::DexCache::kDexCacheMethodCacheSize))))
 #define CARD_TABLE_CARD_SHIFT 0xa
 DEFINE_CHECK_EQ(static_cast<size_t>(CARD_TABLE_CARD_SHIFT), (static_cast<size_t>(art::gc::accounting::CardTable::kCardShift)))
 #define MIN_LARGE_OBJECT_THRESHOLD 0x3000

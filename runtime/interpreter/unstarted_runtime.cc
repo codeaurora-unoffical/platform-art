@@ -27,7 +27,6 @@
 #include <unordered_map>
 
 #include "android-base/stringprintf.h"
-#include "ScopedLocalRef.h"
 
 #include "art_method-inl.h"
 #include "base/casts.h"
@@ -48,6 +47,7 @@
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
 #include "mirror/string-inl.h"
+#include "nativehelper/ScopedLocalRef.h"
 #include "nth_caller_visitor.h"
 #include "reflection.h"
 #include "thread-inl.h"
@@ -265,7 +265,7 @@ void UnstartedRuntime::UnstartedClassNewInstance(
   bool ok = false;
   auto* cl = Runtime::Current()->GetClassLinker();
   if (cl->EnsureInitialized(self, h_klass, true, true)) {
-    auto* cons = h_klass->FindDeclaredDirectMethod("<init>", "()V", cl->GetImagePointerSize());
+    auto* cons = h_klass->FindConstructor("()V", cl->GetImagePointerSize());
     if (cons != nullptr) {
       Handle<mirror::Object> h_obj(hs.NewHandle(klass->AllocObject(self)));
       CHECK(h_obj != nullptr);  // We don't expect OOM at compile-time.
@@ -591,8 +591,7 @@ static void GetResourceAsStream(Thread* self,
   }
 
   auto* cl = Runtime::Current()->GetClassLinker();
-  ArtMethod* constructor = h_class->FindDeclaredDirectMethod(
-      "<init>", "([B)V", cl->GetImagePointerSize());
+  ArtMethod* constructor = h_class->FindConstructor("([B)V", cl->GetImagePointerSize());
   if (constructor == nullptr) {
     AbortTransactionOrFail(self, "Could not find ByteArrayInputStream constructor");
     return;
@@ -1010,8 +1009,7 @@ static ObjPtr<mirror::Object> CreateInstanceOf(Thread* self, const char* class_d
   Handle<mirror::Class> h_class(hs.NewHandle(klass));
   Handle<mirror::Object> h_obj(hs.NewHandle(h_class->AllocObject(self)));
   if (h_obj != nullptr) {
-    ArtMethod* init_method = h_class->FindDirectMethod(
-        "<init>", "()V", class_linker->GetImagePointerSize());
+    ArtMethod* init_method = h_class->FindConstructor("()V", class_linker->GetImagePointerSize());
     if (init_method == nullptr) {
       AbortTransactionOrFail(self, "Could not find <init> for %s", class_descriptor);
       return nullptr;

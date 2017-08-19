@@ -1008,6 +1008,20 @@ class ImageSpaceLoader {
         }
       }
 
+      if (obj->IsClass()) {
+        mirror::Class* klass = obj->AsClass<kVerifyNone, kWithoutReadBarrier>();
+        // Fixup super class before visiting instance fields which require
+        // information from their super class to calculate offsets.
+        mirror::Class* super_class = klass->GetSuperClass<kVerifyNone, kWithoutReadBarrier>();
+        if (super_class != nullptr) {
+          mirror::Class* new_super_class = down_cast<mirror::Class*>(ForwardObject(super_class));
+          if (new_super_class != super_class && IsInAppImage(new_super_class)) {
+            // Recursively fix all dependencies.
+            operator()(new_super_class);
+          }
+        }
+      }
+
       obj->VisitReferences</*visit native roots*/false, kVerifyNone, kWithoutReadBarrier>(
           *this,
           *this);
@@ -1254,17 +1268,19 @@ class ImageSpaceLoader {
           }
           dex_cache->FixupResolvedTypes<kWithoutReadBarrier>(new_types, fixup_adapter);
         }
-        ArtMethod** methods = dex_cache->GetResolvedMethods();
+        mirror::MethodDexCacheType* methods = dex_cache->GetResolvedMethods();
         if (methods != nullptr) {
-          ArtMethod** new_methods = fixup_adapter.ForwardObject(methods);
+          mirror::MethodDexCacheType* new_methods = fixup_adapter.ForwardObject(methods);
           if (methods != new_methods) {
             dex_cache->SetResolvedMethods(new_methods);
           }
           for (size_t j = 0, num = dex_cache->NumResolvedMethods(); j != num; ++j) {
-            ArtMethod* orig = mirror::DexCache::GetElementPtrSize(new_methods, j, pointer_size);
+            auto pair = mirror::DexCache::GetNativePairPtrSize(new_methods, j, pointer_size);
+            ArtMethod* orig = pair.object;
             ArtMethod* copy = fixup_adapter.ForwardObject(orig);
             if (orig != copy) {
-              mirror::DexCache::SetElementPtrSize(new_methods, j, copy, pointer_size);
+              pair.object = copy;
+              mirror::DexCache::SetNativePairPtrSize(new_methods, j, pair, pointer_size);
             }
           }
         }

@@ -67,9 +67,11 @@ JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
   ScopedTrace trace(__PRETTY_FUNCTION__);
   CHECK_GE(max_capacity, initial_capacity);
 
-  // Generating debug information is mostly for using the 'perf' tool, which does
-  // not work with ashmem.
-  bool use_ashmem = !generate_debug_info;
+  // Generating debug information is for using the Linux perf tool on
+  // host which does not work with ashmem.
+  // Also, target linux does not support ashmem.
+  bool use_ashmem = !generate_debug_info && !kIsTargetLinux;
+
   // With 'perf', we want a 1-1 mapping between an address and a method.
   bool garbage_collect_code = !generate_debug_info;
 
@@ -420,7 +422,7 @@ void JitCodeCache::FreeAllMethodHeaders(
     const std::unordered_set<OatQuickMethodHeader*>& method_headers) {
   {
     MutexLock mu(Thread::Current(), *Locks::cha_lock_);
-    Runtime::Current()->GetClassHierarchyAnalysis()
+    Runtime::Current()->GetClassLinker()->GetClassHierarchyAnalysis()
         ->RemoveDependentsWithMethodHeaders(method_headers);
   }
 
@@ -630,7 +632,7 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
         << "Should not be using cha on debuggable apps/runs!";
 
     for (ArtMethod* single_impl : cha_single_implementation_list) {
-      Runtime::Current()->GetClassHierarchyAnalysis()->AddDependency(
+      Runtime::Current()->GetClassLinker()->GetClassHierarchyAnalysis()->AddDependency(
           single_impl, method, method_header);
     }
 

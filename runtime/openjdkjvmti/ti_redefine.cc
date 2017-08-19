@@ -36,10 +36,11 @@
 #include "android-base/stringprintf.h"
 
 #include "art_field-inl.h"
-#include "art_method-inl.h"
 #include "art_jvmti.h"
+#include "art_method-inl.h"
 #include "base/array_ref.h"
 #include "base/logging.h"
+#include "base/stringpiece.h"
 #include "class_linker-inl.h"
 #include "debugger.h"
 #include "dex_file.h"
@@ -60,10 +61,10 @@
 #include "mirror/class-inl.h"
 #include "mirror/class_ext.h"
 #include "mirror/object.h"
+#include "nativehelper/ScopedLocalRef.h"
 #include "non_debuggable_classes.h"
 #include "object_lock.h"
 #include "runtime.h"
-#include "ScopedLocalRef.h"
 #include "ti_breakpoint.h"
 #include "ti_class_loader.h"
 #include "transform.h"
@@ -572,13 +573,15 @@ void Redefiner::ClassRedefinition::FindAndAllocateObsoleteMethods(art::mirror::C
 // Try and get the declared method. First try to get a virtual method then a direct method if that's
 // not found.
 static art::ArtMethod* FindMethod(art::Handle<art::mirror::Class> klass,
-                                  const char* name,
+                                  art::StringPiece name,
                                   art::Signature sig) REQUIRES_SHARED(art::Locks::mutator_lock_) {
-  art::ArtMethod* m = klass->FindDeclaredVirtualMethod(name, sig, art::kRuntimePointerSize);
-  if (m == nullptr) {
-    m = klass->FindDeclaredDirectMethod(name, sig, art::kRuntimePointerSize);
+  DCHECK(!klass->IsProxyClass());
+  for (art::ArtMethod& m : klass->GetDeclaredMethodsSlice(art::kRuntimePointerSize)) {
+    if (m.GetName() == name && m.GetSignature() == sig) {
+      return &m;
+    }
   }
-  return m;
+  return nullptr;
 }
 
 bool Redefiner::ClassRedefinition::CheckSameMethods() {
@@ -1368,7 +1371,7 @@ void Redefiner::ClassRedefinition::UpdateMethods(art::ObjPtr<art::mirror::Class>
   const art::DexFile::TypeId& declaring_class_id = dex_file_->GetTypeId(class_def.class_idx_);
   const art::DexFile& old_dex_file = mclass->GetDexFile();
   // Update methods.
-  for (art::ArtMethod& method : mclass->GetMethods(image_pointer_size)) {
+  for (art::ArtMethod& method : mclass->GetDeclaredMethods(image_pointer_size)) {
     const art::DexFile::StringId* new_name_id = dex_file_->FindStringId(method.GetName());
     art::dex::TypeIndex method_return_idx =
         dex_file_->GetIndexForTypeId(*dex_file_->FindTypeId(method.GetReturnTypeDescriptor()));

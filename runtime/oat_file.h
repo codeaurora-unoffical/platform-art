@@ -26,6 +26,7 @@
 #include "base/stringpiece.h"
 #include "compiler_filter.h"
 #include "dex_file.h"
+#include "dex_file_layout.h"
 #include "method_bss_mapping.h"
 #include "mirror/class.h"
 #include "oat.h"
@@ -38,6 +39,7 @@ namespace art {
 
 class BitVector;
 class ElfFile;
+class DexLayoutSections;
 template <class MirrorType> class GcRoot;
 class MemMap;
 class OatDexFile;
@@ -289,17 +291,12 @@ class OatFile {
   // If not null, abs_dex_location is used to resolve the absolute dex
   // location of relative dex locations encoded in the oat file.
   // For example, given absolute location "/data/app/foo/base.apk", encoded
-  // dex locations "base.apk", "base.apk:classes2.dex", etc. would be resolved
-  // to "/data/app/foo/base.apk", "/data/app/foo/base.apk:classes2.dex", etc.
+  // dex locations "base.apk", "base.apk!classes2.dex", etc. would be resolved
+  // to "/data/app/foo/base.apk", "/data/app/foo/base.apk!classes2.dex", etc.
   // Relative encoded dex locations that don't match the given abs_dex_location
   // are left unchanged.
   static std::string ResolveRelativeEncodedDexLocation(
       const char* abs_dex_location, const std::string& rel_dex_location);
-
-  // Create a dependency list (dex locations and checksums) for the given dex files.
-  // Removes dex file paths prefixed with base_dir to convert them back to relative paths.
-  static std::string EncodeDexFileDependencies(const std::vector<const DexFile*>& dex_files,
-                                               const std::string& base_dir);
 
   // Finds the associated oat class for a dex_file and descriptor. Returns an invalid OatClass on
   // error and sets found to false.
@@ -447,6 +444,9 @@ class OatDexFile FINAL {
                                                const char* descriptor,
                                                size_t hash);
 
+  // Madvise the dex file based on the state we are moving to.
+  static void MadviseDexFile(const DexFile& dex_file, MadviseState state);
+
   TypeLookupTable* GetTypeLookupTable() const {
     return lookup_table_.get();
   }
@@ -455,6 +455,11 @@ class OatDexFile FINAL {
 
   // Create only with a type lookup table, used by the compiler to speed up compilation.
   explicit OatDexFile(std::unique_ptr<TypeLookupTable>&& lookup_table);
+
+  // Return the dex layout sections.
+  const DexLayoutSections* GetDexLayoutSections() const {
+    return dex_layout_sections_;
+  }
 
  private:
   OatDexFile(const OatFile* oat_file,
@@ -465,7 +470,8 @@ class OatDexFile FINAL {
              const uint8_t* lookup_table_data,
              const MethodBssMapping* method_bss_mapping,
              const uint32_t* oat_class_offsets_pointer,
-             uint8_t* dex_cache_arrays);
+             uint8_t* dex_cache_arrays,
+             const DexLayoutSections* dex_layout_sections);
 
   static void AssertAotCompiler();
 
@@ -479,6 +485,7 @@ class OatDexFile FINAL {
   const uint32_t* const oat_class_offsets_pointer_ = 0u;
   uint8_t* const dex_cache_arrays_ = nullptr;
   mutable std::unique_ptr<TypeLookupTable> lookup_table_;
+  const DexLayoutSections* const dex_layout_sections_ = nullptr;
 
   friend class OatFile;
   friend class OatFileBase;
