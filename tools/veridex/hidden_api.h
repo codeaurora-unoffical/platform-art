@@ -17,6 +17,10 @@
 #ifndef ART_TOOLS_VERIDEX_HIDDEN_API_H_
 #define ART_TOOLS_VERIDEX_HIDDEN_API_H_
 
+#include "dex/hidden_api_access_flags.h"
+#include "dex/method_reference.h"
+
+#include <ostream>
 #include <set>
 #include <string>
 
@@ -35,27 +39,53 @@ class HiddenApi {
     FillList(blacklist, blacklist_);
   }
 
-  bool LogIfInList(const std::string& name, const char* access_kind) const {
-    return LogIfIn(name, blacklist_, "Blacklist", access_kind) ||
-        LogIfIn(name, dark_greylist_, "Dark greylist", access_kind) ||
-        LogIfIn(name, light_greylist_, "Light greylist", access_kind);
+  HiddenApiAccessFlags::ApiList GetApiList(const std::string& name) const {
+    if (IsInList(name, blacklist_)) {
+      return HiddenApiAccessFlags::kBlacklist;
+    } else if (IsInList(name, dark_greylist_)) {
+      return HiddenApiAccessFlags::kDarkGreylist;
+    } else if (IsInList(name, light_greylist_)) {
+      return HiddenApiAccessFlags::kLightGreylist;
+    } else {
+      return HiddenApiAccessFlags::kWhitelist;
+    }
+  }
+
+  bool IsInRestrictionList(const std::string& name) const {
+    return GetApiList(name) != HiddenApiAccessFlags::kWhitelist;
   }
 
   static std::string GetApiMethodName(const DexFile& dex_file, uint32_t method_index);
 
   static std::string GetApiFieldName(const DexFile& dex_file, uint32_t field_index);
 
+  static std::string GetApiMethodName(MethodReference ref) {
+    return HiddenApi::GetApiMethodName(*ref.dex_file, ref.index);
+  }
+
+  static std::string ToInternalName(const std::string& str) {
+    std::string val = str;
+    std::replace(val.begin(), val.end(), '.', '/');
+    return "L" + val + ";";
+  }
+
  private:
-  static bool LogIfIn(const std::string& name,
-                      const std::set<std::string>& list,
-                      const std::string& log,
-                      const std::string& access_kind);
+  static bool IsInList(const std::string& name, const std::set<std::string>& list) {
+    return list.find(name) != list.end();
+  }
 
   static void FillList(const char* filename, std::set<std::string>& entries);
 
   std::set<std::string> blacklist_;
   std::set<std::string> light_greylist_;
   std::set<std::string> dark_greylist_;
+};
+
+struct HiddenApiStats {
+  uint32_t count = 0;
+  uint32_t reflection_count = 0;
+  uint32_t linking_count = 0;
+  uint32_t api_counts[4] = { 0, 0, 0, 0 };
 };
 
 }  // namespace art

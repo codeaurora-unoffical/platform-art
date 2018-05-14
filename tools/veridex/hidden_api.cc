@@ -44,17 +44,6 @@ std::string HiddenApi::GetApiFieldName(const DexFile& dex_file, uint32_t field_i
   return ss.str();
 }
 
-bool HiddenApi::LogIfIn(const std::string& name,
-                        const std::set<std::string>& list,
-                        const std::string& log,
-                        const std::string& access_kind) {
-  if (list.find(name) != list.end()) {
-    LOG(WARNING) << std::string(log) << " usage found " << name << " (" << access_kind << ")";
-    return true;
-  }
-  return false;
-}
-
 void HiddenApi::FillList(const char* filename, std::set<std::string>& entries) {
   if (filename == nullptr) {
     return;
@@ -70,6 +59,11 @@ void HiddenApi::FillList(const char* filename, std::set<std::string>& entries) {
       pos = str.find('(');
       if (pos != std::string::npos) {
         // Add the class->method name (so stripping the signature).
+        entries.insert(str.substr(0, pos));
+      }
+      pos = str.find(':');
+      if (pos != std::string::npos) {
+        // Add the class->field name (so stripping the type).
         entries.insert(str.substr(0, pos));
       }
     }

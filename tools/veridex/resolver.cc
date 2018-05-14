@@ -59,6 +59,14 @@ void VeridexResolver::Run() {
 static bool HasSameNameAndSignature(const DexFile& dex_file,
                                     const DexFile::MethodId& method_id,
                                     const char* method_name,
+                                    const char* type) {
+  return strcmp(method_name, dex_file.GetMethodName(method_id)) == 0 &&
+      strcmp(type, dex_file.GetMethodSignature(method_id).ToString().c_str()) == 0;
+}
+
+static bool HasSameNameAndSignature(const DexFile& dex_file,
+                                    const DexFile::MethodId& method_id,
+                                    const char* method_name,
                                     const Signature& signature) {
   return strcmp(method_name, dex_file.GetMethodName(method_id)) == 0 &&
       dex_file.GetMethodSignature(method_id) == signature;
@@ -241,6 +249,34 @@ VeriField VeridexResolver::LookupFieldIn(const VeriClass& kls,
   return nullptr;
 }
 
+VeriMethod VeridexResolver::LookupDeclaredMethodIn(const VeriClass& kls,
+                                                   const char* method_name,
+                                                   const char* type) const {
+  if (kls.IsPrimitive()) {
+    return nullptr;
+  }
+  if (kls.IsArray()) {
+    return nullptr;
+  }
+  VeridexResolver* resolver = GetResolverOf(kls);
+  const DexFile& other_dex_file = resolver->dex_file_;
+  const uint8_t* class_data = other_dex_file.GetClassData(*kls.GetClassDef());
+  if (class_data != nullptr) {
+    ClassDataItemIterator it(other_dex_file, class_data);
+    it.SkipAllFields();
+    for (; it.HasNextMethod(); it.Next()) {
+      const DexFile::MethodId& other_method_id = other_dex_file.GetMethodId(it.GetMemberIndex());
+      if (HasSameNameAndSignature(other_dex_file,
+                                  other_method_id,
+                                  method_name,
+                                  type)) {
+        return it.DataPointer();
+      }
+    }
+  }
+  return nullptr;
+}
+
 VeriMethod VeridexResolver::GetMethod(uint32_t method_index) {
   VeriMethod method_info = method_infos_[method_index];
   if (method_info == nullptr) {
@@ -277,10 +313,8 @@ VeriField VeridexResolver::GetField(uint32_t field_index) {
   return field_info;
 }
 
-void VeridexResolver::ResolveAll(const HiddenApi& hidden_api) {
+void VeridexResolver::ResolveAll() {
   for (uint32_t i = 0; i < dex_file_.NumTypeIds(); ++i) {
-    // Note: we don't look at HiddenApi for types, as the lists don't contain
-    // classes.
     if (GetVeriClass(dex::TypeIndex(i)) == nullptr) {
       LOG(WARNING) << "Unresolved " << dex_file_.PrettyType(dex::TypeIndex(i));
     }
@@ -288,17 +322,13 @@ void VeridexResolver::ResolveAll(const HiddenApi& hidden_api) {
 
   for (uint32_t i = 0; i < dex_file_.NumMethodIds(); ++i) {
     if (GetMethod(i) == nullptr) {
-      if (!hidden_api.LogIfInList(HiddenApi::GetApiMethodName(dex_file_, i), "Linking")) {
-        LOG(WARNING) << "Unresolved: " << dex_file_.PrettyMethod(i);
-      }
+      LOG(WARNING) << "Unresolved: " << dex_file_.PrettyMethod(i);
     }
   }
 
   for (uint32_t i = 0; i < dex_file_.NumFieldIds(); ++i) {
     if (GetField(i) == nullptr) {
-      if (!hidden_api.LogIfInList(HiddenApi::GetApiFieldName(dex_file_, i), "Linking")) {
-        LOG(WARNING) << "Unresolved: " << dex_file_.PrettyField(i);
-      }
+      LOG(WARNING) << "Unresolved: " << dex_file_.PrettyField(i);
     }
   }
 }

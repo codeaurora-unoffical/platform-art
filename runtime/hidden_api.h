@@ -19,6 +19,7 @@
 
 #include "art_field-inl.h"
 #include "art_method-inl.h"
+#include "base/mutex.h"
 #include "dex/hidden_api_access_flags.h"
 #include "mirror/class-inl.h"
 #include "reflection.h"
@@ -32,7 +33,7 @@ namespace hiddenapi {
 // frameworks/base/core/java/android/content/pm/ApplicationInfo.java
 enum class EnforcementPolicy {
   kNoChecks             = 0,
-  kAllLists             = 1,  // ban anything but whitelist
+  kJustWarn             = 1,  // keep checks enabled, but allow everything (enables logging)
   kDarkGreyAndBlackList = 2,  // ban dark grey & blacklist
   kBlacklistOnly        = 3,  // ban blacklist violations only
   kMax = kBlacklistOnly,
@@ -52,52 +53,39 @@ enum Action {
 };
 
 enum AccessMethod {
+  kNone,  // internal test that does not correspond to an actual access by app
   kReflection,
   kJNI,
   kLinking,
 };
 
-inline std::ostream& operator<<(std::ostream& os, AccessMethod value) {
-  switch (value) {
-    case kReflection:
-      os << "reflection";
-      break;
-    case kJNI:
-      os << "JNI";
-      break;
-    case kLinking:
-      os << "linking";
-      break;
+// Do not change the values of items in this enum, as they are written to the
+// event log for offline analysis. Any changes will interfere with that analysis.
+enum AccessContextFlags {
+  // Accessed member is a field if this bit is set, else a method
+  kMemberIsField = 1 << 0,
+  // Indicates if access was denied to the member, instead of just printing a warning.
+  kAccessDenied  = 1 << 1,
+};
+
+inline Action GetActionFromAccessFlags(HiddenApiAccessFlags::ApiList api_list) {
+  if (api_list == HiddenApiAccessFlags::kWhitelist) {
+    return kAllow;
   }
-  return os;
-}
 
-static constexpr bool EnumsEqual(EnforcementPolicy policy, HiddenApiAccessFlags::ApiList apiList) {
-  return static_cast<int>(policy) == static_cast<int>(apiList);
-}
-
-inline Action GetMemberAction(uint32_t access_flags) {
   EnforcementPolicy policy = Runtime::Current()->GetHiddenApiEnforcementPolicy();
   if (policy == EnforcementPolicy::kNoChecks) {
     // Exit early. Nothing to enforce.
     return kAllow;
   }
 
-  HiddenApiAccessFlags::ApiList api_list = HiddenApiAccessFlags::DecodeFromRuntime(access_flags);
-  if (api_list == HiddenApiAccessFlags::kWhitelist) {
-    return kAllow;
+  // if policy is "just warn", always warn. We returned above for whitelist APIs.
+  if (policy == EnforcementPolicy::kJustWarn) {
+    return kAllowButWarn;
   }
+  DCHECK(policy >= EnforcementPolicy::kDarkGreyAndBlackList);
   // The logic below relies on equality of values in the enums EnforcementPolicy and
-  // HiddenApiAccessFlags::ApiList, and their ordering. Assert that this is as expected.
-  static_assert(
-      EnumsEqual(EnforcementPolicy::kAllLists, HiddenApiAccessFlags::kLightGreylist) &&
-      EnumsEqual(EnforcementPolicy::kDarkGreyAndBlackList, HiddenApiAccessFlags::kDarkGreylist) &&
-      EnumsEqual(EnforcementPolicy::kBlacklistOnly, HiddenApiAccessFlags::kBlacklist),
-      "Mismatch between EnforcementPolicy and ApiList enums");
-  static_assert(
-      EnforcementPolicy::kAllLists < EnforcementPolicy::kDarkGreyAndBlackList &&
-      EnforcementPolicy::kDarkGreyAndBlackList < EnforcementPolicy::kBlacklistOnly,
-      "EnforcementPolicy values ordering not correct");
+  // HiddenApiAccessFlags::ApiList, and their ordering. Assertions are in hidden_api.cc.
   if (static_cast<int>(policy) > static_cast<int>(api_list)) {
     return api_list == HiddenApiAccessFlags::kDarkGreylist
         ? kAllowButWarnAndToast
@@ -107,88 +95,54 @@ inline Action GetMemberAction(uint32_t access_flags) {
   }
 }
 
-// Issue a warning about field access.
-inline void WarnAboutMemberAccess(ArtField* field, AccessMethod access_method)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  std::string tmp;
-  LOG(WARNING) << "Accessing hidden field "
-               << field->GetDeclaringClass()->GetDescriptor(&tmp) << "->"
-               << field->GetName() << ":" << field->GetTypeDescriptor()
-               << " (" << HiddenApiAccessFlags::DecodeFromRuntime(field->GetAccessFlags())
-               << ", " << access_method << ")";
-}
+// Implementation details. DO NOT ACCESS DIRECTLY.
+namespace detail {
 
-// Issue a warning about method access.
-inline void WarnAboutMemberAccess(ArtMethod* method, AccessMethod access_method)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  std::string tmp;
-  LOG(WARNING) << "Accessing hidden method "
-               << method->GetDeclaringClass()->GetDescriptor(&tmp) << "->"
-               << method->GetName() << method->GetSignature().ToString()
-               << " (" << HiddenApiAccessFlags::DecodeFromRuntime(method->GetAccessFlags())
-               << ", " << access_method << ")";
-}
+// Class to encapsulate the signature of a member (ArtField or ArtMethod). This
+// is used as a helper when matching prefixes, and when logging the signature.
+class MemberSignature {
+ private:
+  enum MemberType {
+    kField,
+    kMethod,
+  };
 
-// Returns true if access to `member` should be denied to the caller of the
-// reflective query. The decision is based on whether the caller is in the
-// platform or not. Because different users of this function determine this
-// in a different way, `fn_caller_in_platform(self)` is called and should
-// return true if the caller is located in the platform.
-// This function might print warnings into the log if the member is hidden.
+  std::string class_name_;
+  std::string member_name_;
+  std::string type_signature_;
+  std::string tmp_;
+  MemberType type_;
+
+  inline std::vector<const char*> GetSignatureParts() const;
+
+ public:
+  explicit MemberSignature(ArtField* field) REQUIRES_SHARED(Locks::mutator_lock_);
+  explicit MemberSignature(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_);
+
+  void Dump(std::ostream& os) const;
+
+  // Performs prefix match on this member. Since the full member signature is
+  // composed of several parts, we match each part in turn (rather than
+  // building the entire thing in memory and performing a simple prefix match)
+  bool DoesPrefixMatch(const std::string& prefix) const;
+
+  bool IsExempted(const std::vector<std::string>& exemptions);
+
+  void WarnAboutAccess(AccessMethod access_method, HiddenApiAccessFlags::ApiList list);
+
+  void LogAccessToEventLog(AccessMethod access_method, Action action_taken);
+};
+
 template<typename T>
-inline bool ShouldBlockAccessToMember(T* member,
-                                      Thread* self,
-                                      std::function<bool(Thread*)> fn_caller_in_platform,
-                                      AccessMethod access_method)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  DCHECK(member != nullptr);
-
-  Action action = GetMemberAction(member->GetAccessFlags());
-  if (action == kAllow) {
-    // Nothing to do.
-    return false;
-  }
-
-  // Member is hidden. Invoke `fn_caller_in_platform` and find the origin of the access.
-  // This can be *very* expensive. Save it for last.
-  if (fn_caller_in_platform(self)) {
-    // Caller in the platform. Exit.
-    return false;
-  }
-
-  // Member is hidden and caller is not in the platform.
-
-  // Print a log message with information about this class member access.
-  // We do this regardless of whether we block the access or not.
-  WarnAboutMemberAccess(member, access_method);
-
-  if (action == kDeny) {
-    // Block access
-    return true;
-  }
-
-  // Allow access to this member but print a warning.
-  DCHECK(action == kAllowButWarn || action == kAllowButWarnAndToast);
-
-  Runtime* runtime = Runtime::Current();
-
-  // Depending on a runtime flag, we might move the member into whitelist and
-  // skip the warning the next time the member is accessed.
-  if (runtime->ShouldDedupeHiddenApiWarnings()) {
-    member->SetAccessFlags(HiddenApiAccessFlags::EncodeForRuntime(
-        member->GetAccessFlags(), HiddenApiAccessFlags::kWhitelist));
-  }
-
-  // If this action requires a UI warning, set the appropriate flag.
-  if (action == kAllowButWarnAndToast || runtime->ShouldAlwaysSetHiddenApiWarningFlag()) {
-    runtime->SetPendingHiddenApiWarning(true);
-  }
-
-  return false;
-}
+Action GetMemberActionImpl(T* member,
+                           HiddenApiAccessFlags::ApiList api_list,
+                           Action action,
+                           AccessMethod access_method)
+    REQUIRES_SHARED(Locks::mutator_lock_);
 
 // Returns true if the caller is either loaded by the boot strap class loader or comes from
 // a dex file located in ${ANDROID_ROOT}/framework/.
+ALWAYS_INLINE
 inline bool IsCallerInPlatformDex(ObjPtr<mirror::ClassLoader> caller_class_loader,
                                   ObjPtr<mirror::DexCache> caller_dex_cache)
     REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -202,26 +156,76 @@ inline bool IsCallerInPlatformDex(ObjPtr<mirror::ClassLoader> caller_class_loade
   }
 }
 
+}  // namespace detail
+
+// Returns true if access to `member` should be denied to the caller of the
+// reflective query. The decision is based on whether the caller is in the
+// platform or not. Because different users of this function determine this
+// in a different way, `fn_caller_in_platform(self)` is called and should
+// return true if the caller is located in the platform.
+// This function might print warnings into the log if the member is hidden.
+template<typename T>
+inline Action GetMemberAction(T* member,
+                              Thread* self,
+                              std::function<bool(Thread*)> fn_caller_in_platform,
+                              AccessMethod access_method)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  DCHECK(member != nullptr);
+
+  // Decode hidden API access flags.
+  // NB Multiple threads might try to access (and overwrite) these simultaneously,
+  // causing a race. We only do that if access has not been denied, so the race
+  // cannot change Java semantics. We should, however, decode the access flags
+  // once and use it throughout this function, otherwise we may get inconsistent
+  // results, e.g. print whitelist warnings (b/78327881).
+  HiddenApiAccessFlags::ApiList api_list = member->GetHiddenApiAccessFlags();
+
+  Action action = GetActionFromAccessFlags(member->GetHiddenApiAccessFlags());
+  if (action == kAllow) {
+    // Nothing to do.
+    return action;
+  }
+
+  // Member is hidden. Invoke `fn_caller_in_platform` and find the origin of the access.
+  // This can be *very* expensive. Save it for last.
+  if (fn_caller_in_platform(self)) {
+    // Caller in the platform. Exit.
+    return kAllow;
+  }
+
+  // Member is hidden and caller is not in the platform.
+  return detail::GetMemberActionImpl(member, api_list, action, access_method);
+}
+
 inline bool IsCallerInPlatformDex(ObjPtr<mirror::Class> caller)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  return !caller.IsNull() && IsCallerInPlatformDex(caller->GetClassLoader(), caller->GetDexCache());
+  return !caller.IsNull() &&
+      detail::IsCallerInPlatformDex(caller->GetClassLoader(), caller->GetDexCache());
 }
 
 // Returns true if access to `member` should be denied to a caller loaded with
 // `caller_class_loader`.
 // This function might print warnings into the log if the member is hidden.
 template<typename T>
-inline bool ShouldBlockAccessToMember(T* member,
-                                      ObjPtr<mirror::ClassLoader> caller_class_loader,
-                                      ObjPtr<mirror::DexCache> caller_dex_cache,
-                                      AccessMethod access_method)
+inline Action GetMemberAction(T* member,
+                              ObjPtr<mirror::ClassLoader> caller_class_loader,
+                              ObjPtr<mirror::DexCache> caller_dex_cache,
+                              AccessMethod access_method)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  bool caller_in_platform = IsCallerInPlatformDex(caller_class_loader, caller_dex_cache);
-  return ShouldBlockAccessToMember(member,
-                                   /* thread */ nullptr,
-                                   [caller_in_platform] (Thread*) { return caller_in_platform; },
-                                   access_method);
+  bool caller_in_platform = detail::IsCallerInPlatformDex(caller_class_loader, caller_dex_cache);
+  return GetMemberAction(member,
+                         /* thread */ nullptr,
+                         [caller_in_platform] (Thread*) { return caller_in_platform; },
+                         access_method);
 }
+
+// Calls back into managed code to notify VMRuntime.nonSdkApiUsageConsumer that
+// |member| was accessed. This is usually called when an API is on the black,
+// dark grey or light grey lists. Given that the callback can execute arbitrary
+// code, a call to this method can result in thread suspension.
+template<typename T> void NotifyHiddenApiListener(T* member)
+    REQUIRES_SHARED(Locks::mutator_lock_);
+
 
 }  // namespace hiddenapi
 }  // namespace art

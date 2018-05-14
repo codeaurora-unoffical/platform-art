@@ -536,6 +536,14 @@ class Runtime {
     pending_hidden_api_warning_ = value;
   }
 
+  void SetHiddenApiExemptions(const std::vector<std::string>& exemptions) {
+    hidden_api_exemptions_ = exemptions;
+  }
+
+  const std::vector<std::string>& GetHiddenApiExemptions() {
+    return hidden_api_exemptions_;
+  }
+
   bool HasPendingHiddenApiWarning() const {
     return pending_hidden_api_warning_;
   }
@@ -554,6 +562,14 @@ class Runtime {
 
   bool ShouldAlwaysSetHiddenApiWarningFlag() const {
     return always_set_hidden_api_warning_flag_;
+  }
+
+  void SetHiddenApiEventLogSampleRate(uint32_t rate) {
+    hidden_api_access_event_log_rate_ = rate;
+  }
+
+  uint32_t GetHiddenApiEventLogSampleRate() const {
+    return hidden_api_access_event_log_rate_;
   }
 
   bool IsDexFileFallbackEnabled() const {
@@ -697,10 +713,7 @@ class Runtime {
   void AddSystemWeakHolder(gc::AbstractSystemWeakHolder* holder);
   void RemoveSystemWeakHolder(gc::AbstractSystemWeakHolder* holder);
 
-  void AttachAgent(JNIEnv* env,
-                   const std::string& agent_arg,
-                   jobject class_loader,
-                   bool allow_non_debuggable_tooling = false);
+  void AttachAgent(JNIEnv* env, const std::string& agent_arg, jobject class_loader);
 
   const std::list<std::unique_ptr<ti::Agent>>& GetAgents() const {
     return agents_;
@@ -996,6 +1009,10 @@ class Runtime {
   // Whether access checks on hidden API should be performed.
   hiddenapi::EnforcementPolicy hidden_api_policy_;
 
+  // List of signature prefixes of methods that have been removed from the blacklist, and treated
+  // as if whitelisted.
+  std::vector<std::string> hidden_api_exemptions_;
+
   // Whether the application has used an API which is not restricted but we
   // should issue a warning about it.
   bool pending_hidden_api_warning_;
@@ -1008,6 +1025,10 @@ class Runtime {
   // framework to show a UI warning. If this flag is set, always set the flag
   // when there is a warning. This is only used for testing.
   bool always_set_hidden_api_warning_flag_;
+
+  // How often to log hidden API access to the event log. An integer between 0 (never)
+  // and 0x10000 (always).
+  uint32_t hidden_api_access_event_log_rate_;
 
   // Whether threads should dump their native stack on SIGQUIT.
   bool dump_native_stack_on_sig_quit_;
