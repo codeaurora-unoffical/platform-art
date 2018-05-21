@@ -572,6 +572,18 @@ class Runtime {
     return hidden_api_access_event_log_rate_;
   }
 
+  const std::string& GetProcessPackageName() const {
+    return process_package_name_;
+  }
+
+  void SetProcessPackageName(const char* package_name) {
+    if (package_name == nullptr) {
+      process_package_name_.clear();
+    } else {
+      process_package_name_ = package_name;
+    }
+  }
+
   bool IsDexFileFallbackEnabled() const {
     return allow_dex_file_fallback_;
   }
@@ -713,10 +725,7 @@ class Runtime {
   void AddSystemWeakHolder(gc::AbstractSystemWeakHolder* holder);
   void RemoveSystemWeakHolder(gc::AbstractSystemWeakHolder* holder);
 
-  void AttachAgent(JNIEnv* env,
-                   const std::string& agent_arg,
-                   jobject class_loader,
-                   bool allow_non_debuggable_tooling = false);
+  void AttachAgent(JNIEnv* env, const std::string& agent_arg, jobject class_loader);
 
   const std::list<std::unique_ptr<ti::Agent>>& GetAgents() const {
     return agents_;
@@ -1029,9 +1038,12 @@ class Runtime {
   // when there is a warning. This is only used for testing.
   bool always_set_hidden_api_warning_flag_;
 
-  // How often to log hidden API access to the event log. An integer between 0 (never)
-  // and 0x10000 (always).
+  // How often to log hidden API access to the event log. An integer between 0
+  // (never) and 0x10000 (always).
   uint32_t hidden_api_access_event_log_rate_;
+
+  // The package of the app running in this process.
+  std::string process_package_name_;
 
   // Whether threads should dump their native stack on SIGQUIT.
   bool dump_native_stack_on_sig_quit_;
