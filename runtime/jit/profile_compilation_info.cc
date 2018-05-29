@@ -98,9 +98,7 @@ ProfileCompilationInfo::ProfileCompilationInfo()
 
 ProfileCompilationInfo::~ProfileCompilationInfo() {
   VLOG(profiler) << Dumpable<MemStats>(allocator_.GetMemStats());
-  for (DexFileData* data : info_) {
-    delete data;
-  }
+  ClearData();
 }
 
 void ProfileCompilationInfo::DexPcData::AddClass(uint16_t dex_profile_idx,
@@ -1352,7 +1350,7 @@ ProfileCompilationInfo::ProfileLoadStatus ProfileCompilationInfo::LoadInternal(
     if (!filter_fn(profile_line_headers[k].dex_location, profile_line_headers[k].checksum)) {
       // We have to skip the line. Advanced the current pointer of the buffer.
       size_t profile_line_size =
-           profile_line_headers[k].class_set_size +
+           profile_line_headers[k].class_set_size * sizeof(uint16_t) +
            profile_line_headers[k].method_region_size_bytes +
            DexFileData::ComputeBitmapStorage(profile_line_headers[k].num_method_ids);
       uncompressed_data.Advance(profile_line_size);
@@ -2105,6 +2103,14 @@ bool ProfileCompilationInfo::ProfileFilterFnAcceptAll(
     const std::string& dex_location ATTRIBUTE_UNUSED,
     uint32_t checksum ATTRIBUTE_UNUSED) {
   return true;
+}
+
+void ProfileCompilationInfo::ClearData() {
+  for (DexFileData* data : info_) {
+    delete data;
+  }
+  info_.clear();
+  profile_key_map_.clear();
 }
 
 }  // namespace art

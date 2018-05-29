@@ -873,7 +873,11 @@ void Runtime::EndThreadBirth() REQUIRES(Locks::runtime_shutdown_lock_) {
 }
 
 void Runtime::InitNonZygoteOrPostFork(
-    JNIEnv* env, bool is_system_server, NativeBridgeAction action, const char* isa) {
+    JNIEnv* env,
+    bool is_system_server,
+    NativeBridgeAction action,
+    const char* isa,
+    bool profile_system_server) {
   is_zygote_ = false;
 
   if (is_native_bridge_loaded_) {
@@ -896,8 +900,15 @@ void Runtime::InitNonZygoteOrPostFork(
   heap_->ResetGcPerformanceInfo();
 
   // We may want to collect profiling samples for system server, but we never want to JIT there.
-  if ((!is_system_server || !jit_options_->UseJitCompilation()) &&
-      !safe_mode_ &&
+  if (is_system_server) {
+    jit_options_->SetUseJitCompilation(false);
+    jit_options_->SetSaveProfilingInfo(profile_system_server);
+    if (profile_system_server) {
+      jit_options_->SetWaitForJitNotificationsToSaveProfile(false);
+      VLOG(profiler) << "Enabling system server profiles";
+    }
+  }
+  if (!safe_mode_ &&
       (jit_options_->UseJitCompilation() || jit_options_->GetSaveProfilingInfo()) &&
       jit_ == nullptr) {
     // Note that when running ART standalone (not zygote, nor zygote fork),
@@ -1014,7 +1025,8 @@ static bool OpenDexFilesFromImage(const std::string& image_location,
       return false;
     }
     std::unique_ptr<const OatFile> oat_file(
-        OatFile::OpenWithElfFile(elf_file.release(),
+        OatFile::OpenWithElfFile(/* zip_fd */ -1,
+                                 elf_file.release(),
                                  vdex_file.release(),
                                  oat_location,
                                  nullptr,
@@ -1204,7 +1216,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   // As is, we're encoding some logic here about which specific policy to use, which would be better
   // controlled by the framework.
   hidden_api_policy_ = do_hidden_api_checks
-      ? hiddenapi::EnforcementPolicy::kBlacklistOnly
+      ? hiddenapi::EnforcementPolicy::kDarkGreyAndBlackList
       : hiddenapi::EnforcementPolicy::kNoChecks;
 
   no_sig_chain_ = runtime_options.Exists(Opt::NoSigChain);
@@ -1612,7 +1624,6 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 }
 
 static bool EnsureJvmtiPlugin(Runtime* runtime,
-                              bool allow_non_debuggable_tooling,
                               std::vector<Plugin>* plugins,
                               std::string* error_msg) {
   constexpr const char* plugin_name = kIsDebugBuild ? "libopenjdkjvmtid.so" : "libopenjdkjvmti.so";
@@ -1624,10 +1635,13 @@ static bool EnsureJvmtiPlugin(Runtime* runtime,
     }
   }
 
+  // TODO Rename Dbg::IsJdwpAllowed is IsDebuggingAllowed.
+  DCHECK(Dbg::IsJdwpAllowed() || !runtime->IsJavaDebuggable())
+      << "Being debuggable requires that jdwp (i.e. debugging) is allowed.";
   // Is the process debuggable? Otherwise, do not attempt to load the plugin unless we are
   // specifically allowed.
-  if (!allow_non_debuggable_tooling && !runtime->IsJavaDebuggable()) {
-    *error_msg = "Process is not debuggable.";
+  if (!Dbg::IsJdwpAllowed()) {
+    *error_msg = "Process is not allowed to load openjdkjvmti plugin. Process must be debuggable";
     return false;
   }
 
@@ -1647,12 +1661,9 @@ static bool EnsureJvmtiPlugin(Runtime* runtime,
 //   revisit this and make sure we're doing this on the right thread
 //   (and we synchronize access to any shared data structures like "agents_")
 //
-void Runtime::AttachAgent(JNIEnv* env,
-                          const std::string& agent_arg,
-                          jobject class_loader,
-                          bool allow_non_debuggable_tooling) {
+void Runtime::AttachAgent(JNIEnv* env, const std::string& agent_arg, jobject class_loader) {
   std::string error_msg;
-  if (!EnsureJvmtiPlugin(this, allow_non_debuggable_tooling, &plugins_, &error_msg)) {
+  if (!EnsureJvmtiPlugin(this, &plugins_, &error_msg)) {
     LOG(WARNING) << "Could not load plugin: " << error_msg;
     ScopedObjectAccess soa(Thread::Current());
     ThrowIOException("%s", error_msg.c_str());

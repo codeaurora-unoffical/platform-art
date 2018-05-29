@@ -24,6 +24,8 @@
 
 namespace art {
 
+static int gTargetSdkVersion = 1000;  // Will be initialized after parsing options.
+
 /**
  * Abstraction for fields defined in dex files. Currently, that's a pointer into their
  * `encoded_field` description.
@@ -65,6 +67,7 @@ class VeriClass {
 
   static VeriClass* object_;
   static VeriClass* class_;
+  static VeriClass* class_loader_;
   static VeriClass* string_;
   static VeriClass* throwable_;
   static VeriClass* boolean_;
@@ -83,6 +86,9 @@ class VeriClass {
   static VeriMethod getMethod_;
   static VeriMethod getDeclaredMethod_;
   static VeriMethod getClass_;
+  static VeriMethod loadClass_;
+
+  static VeriField sdkInt_;
 
  private:
   Primitive::Type kind_;
