@@ -83,6 +83,10 @@ MemberSignature::MemberSignature(ArtField* field) {
 }
 
 MemberSignature::MemberSignature(ArtMethod* method) {
+  // If this is a proxy method, print the signature of the interface method.
+  method = method->GetInterfaceMethodIfProxy(
+      Runtime::Current()->GetClassLinker()->GetImagePointerSize());
+
   class_name_ = method->GetDeclaringClass()->GetDescriptor(&tmp_);
   member_name_ = method->GetName();
   type_signature_ = method->GetSignature().ToString();
@@ -154,10 +158,11 @@ inline static int32_t GetEnumValueForLog(AccessMethod access_method) {
 }
 
 void MemberSignature::LogAccessToEventLog(AccessMethod access_method, Action action_taken) {
-  if (access_method == kLinking) {
+  if (access_method == kLinking || access_method == kNone) {
     // Linking warnings come from static analysis/compilation of the bytecode
     // and can contain false positives (i.e. code that is never run). We choose
     // not to log these in the event log.
+    // None does not correspond to actual access, so should also be ignored.
     return;
   }
   ComplexEventLogger log_maker(ACTION_HIDDEN_API_ACCESSED);
@@ -165,10 +170,31 @@ void MemberSignature::LogAccessToEventLog(AccessMethod access_method, Action act
   if (action_taken == kDeny) {
     log_maker.AddTaggedData(FIELD_HIDDEN_API_ACCESS_DENIED, 1);
   }
+  const std::string& package_name = Runtime::Current()->GetProcessPackageName();
+  if (!package_name.empty()) {
+    log_maker.SetPackageName(package_name);
+  }
   std::ostringstream signature_str;
   Dump(signature_str);
   log_maker.AddTaggedData(FIELD_HIDDEN_API_SIGNATURE, signature_str.str());
   log_maker.Record();
+}
+
+static ALWAYS_INLINE bool CanUpdateMemberAccessFlags(ArtField*) {
+  return true;
+}
+
+static ALWAYS_INLINE bool CanUpdateMemberAccessFlags(ArtMethod* method) {
+  return !method->IsIntrinsic();
+}
+
+template<typename T>
+static ALWAYS_INLINE void MaybeWhitelistMember(Runtime* runtime, T* member)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  if (CanUpdateMemberAccessFlags(member) && runtime->ShouldDedupeHiddenApiWarnings()) {
+    member->SetAccessFlags(HiddenApiAccessFlags::EncodeForRuntime(
+        member->GetAccessFlags(), HiddenApiAccessFlags::kWhitelist));
+  }
 }
 
 template<typename T>
@@ -195,10 +221,7 @@ Action GetMemberActionImpl(T* member,
       // Avoid re-examining the exemption list next time.
       // Note this results in no warning for the member, which seems like what one would expect.
       // Exemptions effectively adds new members to the whitelist.
-      if (runtime->ShouldDedupeHiddenApiWarnings()) {
-        member->SetAccessFlags(HiddenApiAccessFlags::EncodeForRuntime(
-                member->GetAccessFlags(), HiddenApiAccessFlags::kWhitelist));
-      }
+      MaybeWhitelistMember(runtime, member);
       return kAllow;
     }
 
@@ -230,10 +253,7 @@ Action GetMemberActionImpl(T* member,
   if (access_method != kNone) {
     // Depending on a runtime flag, we might move the member into whitelist and
     // skip the warning the next time the member is accessed.
-    if (runtime->ShouldDedupeHiddenApiWarnings()) {
-      member->SetAccessFlags(HiddenApiAccessFlags::EncodeForRuntime(
-          member->GetAccessFlags(), HiddenApiAccessFlags::kWhitelist));
-    }
+    MaybeWhitelistMember(runtime, member);
 
     // If this action requires a UI warning, set the appropriate flag.
     if (action == kAllowButWarnAndToast || runtime->ShouldAlwaysSetHiddenApiWarningFlag()) {

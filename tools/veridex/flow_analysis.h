@@ -21,12 +21,10 @@
 #include "dex/dex_file_reference.h"
 #include "dex/method_reference.h"
 #include "hidden_api.h"
+#include "resolver.h"
 #include "veridex.h"
 
 namespace art {
-
-class VeridexClass;
-class VeridexResolver;
 
 /**
  * The source where a dex register comes from.
@@ -37,6 +35,7 @@ enum class RegisterSource {
   kMethod,
   kClass,
   kString,
+  kConstant,
   kNone
 };
 
@@ -45,13 +44,34 @@ enum class RegisterSource {
  */
 class RegisterValue {
  public:
-  RegisterValue() : source_(RegisterSource::kNone), reference_(nullptr, 0), type_(nullptr) {}
+  RegisterValue() : source_(RegisterSource::kNone),
+                    value_(0),
+                    reference_(nullptr, 0),
+                    type_(nullptr) {}
   RegisterValue(RegisterSource source, DexFileReference reference, const VeriClass* type)
-      : source_(source), reference_(reference), type_(type) {}
+      : source_(source), value_(0), reference_(reference), type_(type) {}
+
+  RegisterValue(RegisterSource source,
+                uint32_t value,
+                DexFileReference reference,
+                const VeriClass* type)
+      : source_(source), value_(value), reference_(reference), type_(type) {}
 
   RegisterSource GetSource() const { return source_; }
   DexFileReference GetDexFileReference() const { return reference_; }
   const VeriClass* GetType() const { return type_; }
+  uint32_t GetParameterIndex() const {
+    CHECK(IsParameter());
+    return value_;
+  }
+  uint32_t GetConstant() const {
+    CHECK(IsConstant());
+    return value_;
+  }
+  bool IsParameter() const { return source_ == RegisterSource::kParameter; }
+  bool IsClass() const { return source_ == RegisterSource::kClass; }
+  bool IsString() const { return source_ == RegisterSource::kString; }
+  bool IsConstant() const { return source_ == RegisterSource::kConstant; }
 
   std::string ToString() const {
     switch (source_) {
@@ -68,6 +88,8 @@ class RegisterValue {
       }
       case RegisterSource::kClass:
         return reference_.dex_file->StringByTypeIdx(dex::TypeIndex(reference_.index));
+      case RegisterSource::kParameter:
+        return std::string("Parameter of ") + reference_.dex_file->PrettyMethod(reference_.index);
       default:
         return "<unknown>";
     }
@@ -75,6 +97,7 @@ class RegisterValue {
 
  private:
   RegisterSource source_;
+  uint32_t value_;
   DexFileReference reference_;
   const VeriClass* type_;
 };
@@ -85,22 +108,18 @@ struct InstructionInfo {
 
 class VeriFlowAnalysis {
  public:
-  VeriFlowAnalysis(VeridexResolver* resolver,
-                   const CodeItemDataAccessor& code_item_accessor)
+  VeriFlowAnalysis(VeridexResolver* resolver, const ClassDataItemIterator& it)
       : resolver_(resolver),
-        code_item_accessor_(code_item_accessor),
-        dex_registers_(code_item_accessor.InsnsSizeInCodeUnits()),
-        instruction_infos_(code_item_accessor.InsnsSizeInCodeUnits()) {}
+        method_id_(it.GetMemberIndex()),
+        code_item_accessor_(resolver->GetDexFile(), it.GetMethodCodeItem()),
+        dex_registers_(code_item_accessor_.InsnsSizeInCodeUnits()),
+        instruction_infos_(code_item_accessor_.InsnsSizeInCodeUnits()) {}
 
   void Run();
 
-  const std::vector<std::pair<RegisterValue, RegisterValue>>& GetFieldUses() const {
-    return field_uses_;
-  }
-
-  const std::vector<std::pair<RegisterValue, RegisterValue>>& GetMethodUses() const {
-    return method_uses_;
-  }
+  virtual RegisterValue AnalyzeInvoke(const Instruction& instruction, bool is_range) = 0;
+  virtual void AnalyzeFieldSet(const Instruction& instruction) = 0;
+  virtual ~VeriFlowAnalysis() {}
 
  private:
   // Find all branches in the code.
@@ -124,14 +143,22 @@ class VeriFlowAnalysis {
       uint32_t dex_register, RegisterSource kind, VeriClass* cls, uint32_t source_id);
   void UpdateRegister(uint32_t dex_register, const RegisterValue& value);
   void UpdateRegister(uint32_t dex_register, const VeriClass* cls);
-  const RegisterValue& GetRegister(uint32_t dex_register);
+  void UpdateRegister(uint32_t dex_register, int32_t value, const VeriClass* cls);
   void ProcessDexInstruction(const Instruction& inst);
   void SetVisited(uint32_t dex_pc);
-  RegisterValue GetReturnType(uint32_t method_index);
   RegisterValue GetFieldType(uint32_t field_index);
 
+  int GetBranchFlags(const Instruction& instruction) const;
+
+ protected:
+  const RegisterValue& GetRegister(uint32_t dex_register) const;
+  RegisterValue GetReturnType(uint32_t method_index);
+
   VeridexResolver* resolver_;
-  const CodeItemDataAccessor& code_item_accessor_;
+
+ private:
+  const uint32_t method_id_;
+  CodeItemDataAccessor code_item_accessor_;
 
   // Vector of register values for all branch targets.
   std::vector<std::unique_ptr<std::vector<RegisterValue>>> dex_registers_;
@@ -144,12 +171,59 @@ class VeriFlowAnalysis {
 
   // The value of invoke instructions, to be fetched when visiting move-result.
   RegisterValue last_result_;
+};
 
-  // List of reflection field uses found.
-  std::vector<std::pair<RegisterValue, RegisterValue>> field_uses_;
+struct ReflectAccessInfo {
+  RegisterValue cls;
+  RegisterValue name;
+  bool is_method;
 
-  // List of reflection method uses found.
-  std::vector<std::pair<RegisterValue, RegisterValue>> method_uses_;
+  ReflectAccessInfo(RegisterValue c, RegisterValue n, bool m) : cls(c), name(n), is_method(m) {}
+
+  bool IsConcrete() const {
+    // We capture RegisterSource::kString for the class, for example in Class.forName.
+    return (cls.IsClass() || cls.IsString()) && name.IsString();
+  }
+};
+
+// Collects all reflection uses.
+class FlowAnalysisCollector : public VeriFlowAnalysis {
+ public:
+  FlowAnalysisCollector(VeridexResolver* resolver, const ClassDataItemIterator& it)
+      : VeriFlowAnalysis(resolver, it) {}
+
+  const std::vector<ReflectAccessInfo>& GetUses() const {
+    return uses_;
+  }
+
+  RegisterValue AnalyzeInvoke(const Instruction& instruction, bool is_range) OVERRIDE;
+  void AnalyzeFieldSet(const Instruction& instruction) OVERRIDE;
+
+ private:
+  // List of reflection uses found, concrete and abstract.
+  std::vector<ReflectAccessInfo> uses_;
+};
+
+// Substitutes reflection uses by new ones.
+class FlowAnalysisSubstitutor : public VeriFlowAnalysis {
+ public:
+  FlowAnalysisSubstitutor(VeridexResolver* resolver,
+                          const ClassDataItemIterator& it,
+                          const std::map<MethodReference, std::vector<ReflectAccessInfo>>& accesses)
+      : VeriFlowAnalysis(resolver, it), accesses_(accesses) {}
+
+  const std::vector<ReflectAccessInfo>& GetUses() const {
+    return uses_;
+  }
+
+  RegisterValue AnalyzeInvoke(const Instruction& instruction, bool is_range) OVERRIDE;
+  void AnalyzeFieldSet(const Instruction& instruction) OVERRIDE;
+
+ private:
+  // List of reflection uses found, concrete and abstract.
+  std::vector<ReflectAccessInfo> uses_;
+  // The abstract uses we are trying to subsititute.
+  const std::map<MethodReference, std::vector<ReflectAccessInfo>>& accesses_;
 };
 
 }  // namespace art

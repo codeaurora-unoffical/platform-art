@@ -873,7 +873,11 @@ void Runtime::EndThreadBirth() REQUIRES(Locks::runtime_shutdown_lock_) {
 }
 
 void Runtime::InitNonZygoteOrPostFork(
-    JNIEnv* env, bool is_system_server, NativeBridgeAction action, const char* isa) {
+    JNIEnv* env,
+    bool is_system_server,
+    NativeBridgeAction action,
+    const char* isa,
+    bool profile_system_server) {
   is_zygote_ = false;
 
   if (is_native_bridge_loaded_) {
@@ -896,8 +900,15 @@ void Runtime::InitNonZygoteOrPostFork(
   heap_->ResetGcPerformanceInfo();
 
   // We may want to collect profiling samples for system server, but we never want to JIT there.
-  if ((!is_system_server || !jit_options_->UseJitCompilation()) &&
-      !safe_mode_ &&
+  if (is_system_server) {
+    jit_options_->SetUseJitCompilation(false);
+    jit_options_->SetSaveProfilingInfo(profile_system_server);
+    if (profile_system_server) {
+      jit_options_->SetWaitForJitNotificationsToSaveProfile(false);
+      VLOG(profiler) << "Enabling system server profiles";
+    }
+  }
+  if (!safe_mode_ &&
       (jit_options_->UseJitCompilation() || jit_options_->GetSaveProfilingInfo()) &&
       jit_ == nullptr) {
     // Note that when running ART standalone (not zygote, nor zygote fork),
@@ -1014,7 +1025,8 @@ static bool OpenDexFilesFromImage(const std::string& image_location,
       return false;
     }
     std::unique_ptr<const OatFile> oat_file(
-        OatFile::OpenWithElfFile(elf_file.release(),
+        OatFile::OpenWithElfFile(/* zip_fd */ -1,
+                                 elf_file.release(),
                                  vdex_file.release(),
                                  oat_location,
                                  nullptr,
@@ -1204,7 +1216,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   // As is, we're encoding some logic here about which specific policy to use, which would be better
   // controlled by the framework.
   hidden_api_policy_ = do_hidden_api_checks
-      ? hiddenapi::EnforcementPolicy::kBlacklistOnly
+      ? hiddenapi::EnforcementPolicy::kDarkGreyAndBlackList
       : hiddenapi::EnforcementPolicy::kNoChecks;
 
   no_sig_chain_ = runtime_options.Exists(Opt::NoSigChain);

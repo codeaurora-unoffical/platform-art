@@ -112,7 +112,12 @@ void VeriFlowAnalysis::UpdateRegister(uint32_t dex_register, const VeriClass* cl
       RegisterValue(RegisterSource::kNone, DexFileReference(nullptr, 0), cls);
 }
 
-const RegisterValue& VeriFlowAnalysis::GetRegister(uint32_t dex_register) {
+void VeriFlowAnalysis::UpdateRegister(uint32_t dex_register, int32_t value, const VeriClass* cls) {
+  current_registers_[dex_register] =
+      RegisterValue(RegisterSource::kConstant, value, DexFileReference(nullptr, 0), cls);
+}
+
+const RegisterValue& VeriFlowAnalysis::GetRegister(uint32_t dex_register) const {
   return current_registers_[dex_register];
 }
 
@@ -129,6 +134,49 @@ RegisterValue VeriFlowAnalysis::GetFieldType(uint32_t field_index) {
   const DexFile::FieldId& field_id = dex_file.GetFieldId(field_index);
   VeriClass* cls = resolver_->GetVeriClass(field_id.type_idx_);
   return RegisterValue(RegisterSource::kField, DexFileReference(&dex_file, field_index), cls);
+}
+
+int VeriFlowAnalysis::GetBranchFlags(const Instruction& instruction) const {
+  switch (instruction.Opcode()) {
+    #define IF_XX(cond, op) \
+    case Instruction::IF_##cond: { \
+      RegisterValue lhs = GetRegister(instruction.VRegA()); \
+      RegisterValue rhs = GetRegister(instruction.VRegB()); \
+      if (lhs.IsConstant() && rhs.IsConstant()) { \
+        if (lhs.GetConstant() op rhs.GetConstant()) { \
+          return Instruction::kBranch; \
+        } else { \
+          return Instruction::kContinue; \
+        } \
+      } \
+      break; \
+    } \
+    case Instruction::IF_##cond##Z: { \
+      RegisterValue val = GetRegister(instruction.VRegA()); \
+      if (val.IsConstant()) { \
+        if (val.GetConstant() op 0) { \
+          return Instruction::kBranch; \
+        } else { \
+          return Instruction::kContinue; \
+        } \
+      } \
+      break; \
+    }
+
+    IF_XX(EQ, ==);
+    IF_XX(NE, !=);
+    IF_XX(LT, <);
+    IF_XX(LE, <=);
+    IF_XX(GT, >);
+    IF_XX(GE, >=);
+
+    #undef IF_XX
+
+    default:
+      break;
+  }
+
+  return Instruction::FlagsOf(instruction.Opcode());
 }
 
 void VeriFlowAnalysis::AnalyzeCode() {
@@ -149,16 +197,17 @@ void VeriFlowAnalysis::AnalyzeCode() {
       ProcessDexInstruction(inst);
       SetVisited(dex_pc);
 
-      int opcode_flags = Instruction::FlagsOf(inst.Opcode());
-      if ((opcode_flags & Instruction::kContinue) != 0) {
-        if ((opcode_flags & Instruction::kBranch) != 0) {
+      int branch_flags = GetBranchFlags(inst);
+
+      if ((branch_flags & Instruction::kContinue) != 0) {
+        if ((branch_flags & Instruction::kBranch) != 0) {
           uint32_t branch_dex_pc = dex_pc + inst.GetTargetOffset();
           if (MergeRegisterValues(branch_dex_pc)) {
             work_list.push_back(branch_dex_pc);
           }
         }
         dex_pc += inst.SizeInCodeUnits();
-      } else if ((opcode_flags & Instruction::kBranch) != 0) {
+      } else if ((branch_flags & Instruction::kBranch) != 0) {
         dex_pc += inst.GetTargetOffset();
         DCHECK(IsBranchTarget(dex_pc));
       } else {
@@ -178,12 +227,30 @@ void VeriFlowAnalysis::AnalyzeCode() {
 
 void VeriFlowAnalysis::ProcessDexInstruction(const Instruction& instruction) {
   switch (instruction.Opcode()) {
-    case Instruction::CONST_4:
-    case Instruction::CONST_16:
-    case Instruction::CONST:
+    case Instruction::CONST_4: {
+      int32_t register_index = instruction.VRegA();
+      int32_t value = instruction.VRegB_11n();
+      UpdateRegister(register_index, value, VeriClass::integer_);
+      break;
+    }
+    case Instruction::CONST_16: {
+      int32_t register_index = instruction.VRegA();
+      int32_t value = instruction.VRegB_21s();
+      UpdateRegister(register_index, value, VeriClass::integer_);
+      break;
+    }
+
+    case Instruction::CONST: {
+      int32_t register_index = instruction.VRegA();
+      int32_t value = instruction.VRegB_31i();
+      UpdateRegister(register_index, value, VeriClass::integer_);
+      break;
+    }
+
     case Instruction::CONST_HIGH16: {
       int32_t register_index = instruction.VRegA();
-      UpdateRegister(register_index, VeriClass::integer_);
+      int32_t value = instruction.VRegB_21h();
+      UpdateRegister(register_index, value, VeriClass::integer_);
       break;
     }
 
@@ -243,43 +310,7 @@ void VeriFlowAnalysis::ProcessDexInstruction(const Instruction& instruction) {
     case Instruction::INVOKE_STATIC:
     case Instruction::INVOKE_SUPER:
     case Instruction::INVOKE_VIRTUAL: {
-      VeriMethod method = resolver_->GetMethod(instruction.VRegB_35c());
-      uint32_t args[5];
-      instruction.GetVarArgs(args);
-      if (method == VeriClass::forName_) {
-        RegisterValue value = GetRegister(args[0]);
-        last_result_ = RegisterValue(
-            value.GetSource(), value.GetDexFileReference(), VeriClass::class_);
-      } else if (IsGetField(method)) {
-        RegisterValue cls = GetRegister(args[0]);
-        RegisterValue name = GetRegister(args[1]);
-        field_uses_.push_back(std::make_pair(cls, name));
-        last_result_ = GetReturnType(instruction.VRegB_35c());
-      } else if (IsGetMethod(method)) {
-        RegisterValue cls = GetRegister(args[0]);
-        RegisterValue name = GetRegister(args[1]);
-        method_uses_.push_back(std::make_pair(cls, name));
-        last_result_ = GetReturnType(instruction.VRegB_35c());
-      } else if (method == VeriClass::getClass_) {
-        RegisterValue obj = GetRegister(args[0]);
-        const VeriClass* cls = obj.GetType();
-        if (cls != nullptr && cls->GetClassDef() != nullptr) {
-          const DexFile::ClassDef* def = cls->GetClassDef();
-          last_result_ = RegisterValue(
-              RegisterSource::kClass,
-              DexFileReference(&resolver_->GetDexFileOf(*cls), def->class_idx_.index_),
-              VeriClass::class_);
-        } else {
-          last_result_ = RegisterValue(
-              obj.GetSource(), obj.GetDexFileReference(), VeriClass::class_);
-        }
-      } else if (method == VeriClass::loadClass_) {
-        RegisterValue value = GetRegister(args[1]);
-        last_result_ = RegisterValue(
-            value.GetSource(), value.GetDexFileReference(), VeriClass::class_);
-      } else {
-        last_result_ = GetReturnType(instruction.VRegB_35c());
-      }
+      last_result_ = AnalyzeInvoke(instruction, /* is_range */ false);
       break;
     }
 
@@ -288,7 +319,7 @@ void VeriFlowAnalysis::ProcessDexInstruction(const Instruction& instruction) {
     case Instruction::INVOKE_STATIC_RANGE:
     case Instruction::INVOKE_SUPER_RANGE:
     case Instruction::INVOKE_VIRTUAL_RANGE: {
-      last_result_ = GetReturnType(instruction.VRegB_3rc());
+      last_result_ = AnalyzeInvoke(instruction, /* is_range */ true);
       break;
     }
 
@@ -304,6 +335,8 @@ void VeriFlowAnalysis::ProcessDexInstruction(const Instruction& instruction) {
     case Instruction::RETURN: {
       break;
     }
+
+    // If operations will be handled when looking at the control flow.
     #define IF_XX(cond) \
     case Instruction::IF_##cond: break; \
     case Instruction::IF_##cond##Z: break
@@ -314,6 +347,8 @@ void VeriFlowAnalysis::ProcessDexInstruction(const Instruction& instruction) {
     IF_XX(LE);
     IF_XX(GT);
     IF_XX(GE);
+
+    #undef IF_XX
 
     case Instruction::GOTO:
     case Instruction::GOTO_16:
@@ -520,6 +555,7 @@ void VeriFlowAnalysis::ProcessDexInstruction(const Instruction& instruction) {
     case Instruction::IPUT_BYTE:
     case Instruction::IPUT_CHAR:
     case Instruction::IPUT_SHORT: {
+      AnalyzeFieldSet(instruction);
       break;
     }
 
@@ -530,7 +566,13 @@ void VeriFlowAnalysis::ProcessDexInstruction(const Instruction& instruction) {
     case Instruction::SGET_BYTE:
     case Instruction::SGET_CHAR:
     case Instruction::SGET_SHORT: {
-      UpdateRegister(instruction.VRegA_22c(), GetFieldType(instruction.VRegC_22c()));
+      uint32_t dest_reg = instruction.VRegA_21c();
+      uint16_t field_index = instruction.VRegB_21c();
+      if (VeriClass::sdkInt_ != nullptr && resolver_->GetField(field_index) == VeriClass::sdkInt_) {
+        UpdateRegister(dest_reg, gTargetSdkVersion, VeriClass::integer_);
+      } else {
+        UpdateRegister(dest_reg, GetFieldType(instruction.VRegC_22c()));
+      }
       break;
     }
 
@@ -541,6 +583,7 @@ void VeriFlowAnalysis::ProcessDexInstruction(const Instruction& instruction) {
     case Instruction::SPUT_BYTE:
     case Instruction::SPUT_CHAR:
     case Instruction::SPUT_SHORT: {
+      AnalyzeFieldSet(instruction);
       break;
     }
 
@@ -613,7 +656,112 @@ void VeriFlowAnalysis::ProcessDexInstruction(const Instruction& instruction) {
 
 void VeriFlowAnalysis::Run() {
   FindBranches();
+  uint32_t number_of_registers = code_item_accessor_.RegistersSize();
+  uint32_t number_of_parameters = code_item_accessor_.InsSize();
+  std::vector<RegisterValue>& initial_values = *dex_registers_[0].get();
+  for (uint32_t i = 0; i < number_of_parameters; ++i) {
+    initial_values[number_of_registers - number_of_parameters + i] = RegisterValue(
+      RegisterSource::kParameter,
+      i,
+      DexFileReference(&resolver_->GetDexFile(), method_id_),
+      nullptr);
+  }
   AnalyzeCode();
+}
+
+static uint32_t GetParameterAt(const Instruction& instruction,
+                               bool is_range,
+                               uint32_t* args,
+                               uint32_t index) {
+  return is_range ? instruction.VRegC() + index : args[index];
+}
+
+RegisterValue FlowAnalysisCollector::AnalyzeInvoke(const Instruction& instruction, bool is_range) {
+  uint32_t id = is_range ? instruction.VRegB_3rc() : instruction.VRegB_35c();
+  VeriMethod method = resolver_->GetMethod(id);
+  uint32_t args[5];
+  if (!is_range) {
+    instruction.GetVarArgs(args);
+  }
+
+  if (method == VeriClass::forName_) {
+    // Class.forName. Fetch the first parameter.
+    RegisterValue value = GetRegister(GetParameterAt(instruction, is_range, args, 0));
+    return RegisterValue(
+        value.GetSource(), value.GetDexFileReference(), VeriClass::class_);
+  } else if (IsGetField(method)) {
+    // Class.getField or Class.getDeclaredField. Fetch the first parameter for the class, and the
+    // second parameter for the field name.
+    RegisterValue cls = GetRegister(GetParameterAt(instruction, is_range, args, 0));
+    RegisterValue name = GetRegister(GetParameterAt(instruction, is_range, args, 1));
+    uses_.push_back(ReflectAccessInfo(cls, name, /* is_method */ false));
+    return GetReturnType(id);
+  } else if (IsGetMethod(method)) {
+    // Class.getMethod or Class.getDeclaredMethod. Fetch the first parameter for the class, and the
+    // second parameter for the field name.
+    RegisterValue cls = GetRegister(GetParameterAt(instruction, is_range, args, 0));
+    RegisterValue name = GetRegister(GetParameterAt(instruction, is_range, args, 1));
+    uses_.push_back(ReflectAccessInfo(cls, name, /* is_method */ true));
+    return GetReturnType(id);
+  } else if (method == VeriClass::getClass_) {
+    // Get the type of the first parameter.
+    RegisterValue obj = GetRegister(GetParameterAt(instruction, is_range, args, 0));
+    const VeriClass* cls = obj.GetType();
+    if (cls != nullptr && cls->GetClassDef() != nullptr) {
+      const DexFile::ClassDef* def = cls->GetClassDef();
+      return RegisterValue(
+          RegisterSource::kClass,
+          DexFileReference(&resolver_->GetDexFileOf(*cls), def->class_idx_.index_),
+          VeriClass::class_);
+    } else {
+      return RegisterValue(
+          obj.GetSource(), obj.GetDexFileReference(), VeriClass::class_);
+    }
+  } else if (method == VeriClass::loadClass_) {
+    // ClassLoader.loadClass. Fetch the first parameter.
+    RegisterValue value = GetRegister(GetParameterAt(instruction, is_range, args, 1));
+    return RegisterValue(
+        value.GetSource(), value.GetDexFileReference(), VeriClass::class_);
+  } else {
+    // Return a RegisterValue referencing the method whose type is the return type
+    // of the method.
+    return GetReturnType(id);
+  }
+}
+
+void FlowAnalysisCollector::AnalyzeFieldSet(const Instruction& instruction ATTRIBUTE_UNUSED) {
+  // There are no fields that escape reflection uses.
+}
+
+RegisterValue FlowAnalysisSubstitutor::AnalyzeInvoke(const Instruction& instruction,
+                                                     bool is_range) {
+  uint32_t id = is_range ? instruction.VRegB_3rc() : instruction.VRegB_35c();
+  MethodReference method(&resolver_->GetDexFile(), id);
+  // TODO: doesn't work for multidex
+  // TODO: doesn't work for overriding (but maybe should be done at a higher level);
+  if (accesses_.find(method) == accesses_.end()) {
+    return GetReturnType(id);
+  }
+  uint32_t args[5];
+  if (!is_range) {
+    instruction.GetVarArgs(args);
+  }
+  for (const ReflectAccessInfo& info : accesses_.at(method)) {
+    if (info.cls.IsParameter() || info.name.IsParameter()) {
+      RegisterValue cls = info.cls.IsParameter()
+          ? GetRegister(GetParameterAt(instruction, is_range, args, info.cls.GetParameterIndex()))
+          : info.cls;
+      RegisterValue name = info.name.IsParameter()
+          ? GetRegister(GetParameterAt(instruction, is_range, args, info.name.GetParameterIndex()))
+          : info.name;
+      uses_.push_back(ReflectAccessInfo(cls, name, info.is_method));
+    }
+  }
+  return GetReturnType(id);
+}
+
+void FlowAnalysisSubstitutor::AnalyzeFieldSet(const Instruction& instruction ATTRIBUTE_UNUSED) {
+  // TODO: analyze field sets.
 }
 
 }  // namespace art
