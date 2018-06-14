@@ -39,7 +39,7 @@ namespace hiddenapi {
 // Note that when flipping this flag, you must also update the expectations of test 674-hiddenapi
 // as it affects whether or not we warn for light grey APIs that have been added to the exemptions
 // list.
-static constexpr bool kLogAllAccesses = true;
+static constexpr bool kLogAllAccesses = false;
 
 static inline std::ostream& operator<<(std::ostream& os, AccessMethod value) {
   switch (value) {
@@ -83,6 +83,10 @@ MemberSignature::MemberSignature(ArtField* field) {
 }
 
 MemberSignature::MemberSignature(ArtMethod* method) {
+  // If this is a proxy method, print the signature of the interface method.
+  method = method->GetInterfaceMethodIfProxy(
+      Runtime::Current()->GetClassLinker()->GetImagePointerSize());
+
   class_name_ = method->GetDeclaringClass()->GetDescriptor(&tmp_);
   member_name_ = method->GetName();
   type_signature_ = method->GetSignature().ToString();
@@ -154,16 +158,21 @@ inline static int32_t GetEnumValueForLog(AccessMethod access_method) {
 }
 
 void MemberSignature::LogAccessToEventLog(AccessMethod access_method, Action action_taken) {
-  if (access_method == kLinking) {
+  if (access_method == kLinking || access_method == kNone) {
     // Linking warnings come from static analysis/compilation of the bytecode
     // and can contain false positives (i.e. code that is never run). We choose
     // not to log these in the event log.
+    // None does not correspond to actual access, so should also be ignored.
     return;
   }
   ComplexEventLogger log_maker(ACTION_HIDDEN_API_ACCESSED);
   log_maker.AddTaggedData(FIELD_HIDDEN_API_ACCESS_METHOD, GetEnumValueForLog(access_method));
   if (action_taken == kDeny) {
     log_maker.AddTaggedData(FIELD_HIDDEN_API_ACCESS_DENIED, 1);
+  }
+  const std::string& package_name = Runtime::Current()->GetProcessPackageName();
+  if (!package_name.empty()) {
+    log_maker.SetPackageName(package_name);
   }
   std::ostringstream signature_str;
   Dump(signature_str);
@@ -206,7 +215,8 @@ Action GetMemberActionImpl(T* member,
   // - for non-debuggable apps, there is no distinction between light grey & whitelisted APIs.
   // - we want to avoid the overhead of checking for exemptions for light greylisted APIs whenever
   //   possible.
-  if (kLogAllAccesses || action == kDeny || runtime->IsJavaDebuggable()) {
+  const bool shouldWarn = kLogAllAccesses || runtime->IsJavaDebuggable();
+  if (shouldWarn || action == kDeny) {
     if (member_signature.IsExempted(runtime->GetHiddenApiExemptions())) {
       action = kAllow;
       // Avoid re-examining the exemption list next time.
@@ -247,7 +257,8 @@ Action GetMemberActionImpl(T* member,
     MaybeWhitelistMember(runtime, member);
 
     // If this action requires a UI warning, set the appropriate flag.
-    if (action == kAllowButWarnAndToast || runtime->ShouldAlwaysSetHiddenApiWarningFlag()) {
+    if (shouldWarn &&
+        (action == kAllowButWarnAndToast || runtime->ShouldAlwaysSetHiddenApiWarningFlag())) {
       runtime->SetPendingHiddenApiWarning(true);
     }
   }
