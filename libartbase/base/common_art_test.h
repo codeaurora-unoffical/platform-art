@@ -54,9 +54,9 @@ class ScratchFile {
 
   ScratchFile(const ScratchFile& other, const char* suffix);
 
-  ScratchFile(ScratchFile&& other);
+  ScratchFile(ScratchFile&& other) noexcept;
 
-  ScratchFile& operator=(ScratchFile&& other);
+  ScratchFile& operator=(ScratchFile&& other) noexcept;
 
   explicit ScratchFile(File* file);
 
@@ -209,11 +209,11 @@ class CommonArtTestBase : public TestType, public CommonArtTestImpl {
   virtual ~CommonArtTestBase() {}
 
  protected:
-  virtual void SetUp() OVERRIDE {
+  void SetUp() override {
     CommonArtTestImpl::SetUp();
   }
 
-  virtual void TearDown() OVERRIDE {
+  void TearDown() override {
     CommonArtTestImpl::TearDown();
   }
 };

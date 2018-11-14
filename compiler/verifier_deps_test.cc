@@ -47,12 +47,11 @@ class VerifierDepsCompilerCallbacks : public CompilerCallbacks {
       : CompilerCallbacks(CompilerCallbacks::CallbackMode::kCompileApp),
         deps_(nullptr) {}
 
-  void MethodVerified(verifier::MethodVerifier* verifier ATTRIBUTE_UNUSED) OVERRIDE {}
-  void ClassRejected(ClassReference ref ATTRIBUTE_UNUSED) OVERRIDE {}
-  bool IsRelocationPossible() OVERRIDE { return false; }
+  void MethodVerified(verifier::MethodVerifier* verifier ATTRIBUTE_UNUSED) override {}
+  void ClassRejected(ClassReference ref ATTRIBUTE_UNUSED) override {}
 
-  verifier::VerifierDeps* GetVerifierDeps() const OVERRIDE { return deps_; }
-  void SetVerifierDeps(verifier::VerifierDeps* deps) { deps_ = deps; }
+  verifier::VerifierDeps* GetVerifierDeps() const override { return deps_; }
+  void SetVerifierDeps(verifier::VerifierDeps* deps) override { deps_ = deps; }
 
  private:
   verifier::VerifierDeps* deps_;
@@ -60,7 +59,7 @@ class VerifierDepsCompilerCallbacks : public CompilerCallbacks {
 
 class VerifierDepsTest : public CommonCompilerTest {
  public:
-  void SetUpRuntimeOptions(RuntimeOptions* options) {
+  void SetUpRuntimeOptions(RuntimeOptions* options) override {
     CommonCompilerTest::SetUpRuntimeOptions(options);
     callbacks_.reset(new VerifierDepsCompilerCallbacks());
   }
@@ -178,7 +177,8 @@ class VerifierDepsTest : public CommonCompilerTest {
                                 true /* allow_soft_failures */,
                                 true /* need_precise_constants */,
                                 false /* verify to dump */,
-                                true /* allow_thread_suspension */);
+                                true /* allow_thread_suspension */,
+                                0 /* api_level */);
         verifier.Verify();
         soa.Self()->SetVerifierDeps(nullptr);
         has_failures = verifier.HasFailures();
@@ -423,7 +423,7 @@ class VerifierDepsTest : public CommonCompilerTest {
     return verifier_deps_->dex_deps_.size();
   }
 
-  size_t HasEachKindOfRecord() {
+  bool HasEachKindOfRecord() {
     bool has_strings = false;
     bool has_assignability = false;
     bool has_classes = false;

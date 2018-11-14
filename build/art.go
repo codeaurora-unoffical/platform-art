@@ -66,7 +66,7 @@ func globalFlags(ctx android.BaseContext) ([]string, []string) {
 			"-DART_READ_BARRIER_TYPE_IS_"+barrierType+"=1")
 	}
 
-	if envTrue(ctx, "ART_USE_GENERATIONAL_CC") {
+	if !envFalse(ctx, "ART_USE_GENERATIONAL_CC") {
 		cflags = append(cflags, "-DART_USE_GENERATIONAL_CC=1")
 	}
 
@@ -154,7 +154,8 @@ func hostFlags(ctx android.BaseContext) []string {
 	if len(ctx.AConfig().SanitizeHost()) > 0 {
 		// art/test/137-cfi/cfi.cc
 		// error: stack frame size of 1944 bytes in function 'Java_Main_unwindInProcess'
-		hostFrameSizeLimit = 6400
+		// error: stack frame size of 6520 bytes in function 'art::interpreter::ExecuteSwitchImplCpp'
+		hostFrameSizeLimit = 7400
 	}
 	cflags = append(cflags,
 		fmt.Sprintf("-Wframe-larger-than=%d", hostFrameSizeLimit),
@@ -283,6 +284,7 @@ func init() {
 	android.RegisterModuleType("art_cc_test_library", artTestLibrary)
 	android.RegisterModuleType("art_cc_defaults", artDefaultsFactory)
 	android.RegisterModuleType("libart_cc_defaults", libartDefaultsFactory)
+	android.RegisterModuleType("libart_static_cc_defaults", libartStaticDefaultsFactory)
 	android.RegisterModuleType("art_global_defaults", artGlobalDefaultsFactory)
 	android.RegisterModuleType("art_debug_defaults", artDebugDefaultsFactory)
 }
@@ -328,6 +330,33 @@ func libartDefaultsFactory() android.Module {
 		if !envTrue(ctx, "ART_TARGET_LINUX") {
 			p.Target.Android.Shared_libs = []string{
 				"libmetricslogger",
+			}
+		}
+		ctx.AppendProperties(p)
+	})
+
+	return module
+}
+
+func libartStaticDefaultsFactory() android.Module {
+	c := &codegenProperties{}
+	module := cc.DefaultsFactory(c)
+	android.AddLoadHook(module, func(ctx android.LoadHookContext) {
+		codegen(ctx, c, true)
+
+		type props struct {
+			Target struct {
+				Android struct {
+					Static_libs []string
+				}
+			}
+		}
+
+		p := &props{}
+		// TODO: express this in .bp instead b/79671158
+		if !envTrue(ctx, "ART_TARGET_LINUX") {
+			p.Target.Android.Static_libs = []string{
+				"libmetricslogger_static",
 			}
 		}
 		ctx.AppendProperties(p)

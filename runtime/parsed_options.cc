@@ -220,9 +220,6 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define({"-Xrelocate", "-Xnorelocate"})
           .WithValues({true, false})
           .IntoKey(M::Relocate)
-      .Define({"-Xdex2oat", "-Xnodex2oat"})
-          .WithValues({true, false})
-          .IntoKey(M::Dex2Oat)
       .Define({"-Ximage-dex2oat", "-Xnoimage-dex2oat"})
           .WithValues({true, false})
           .IntoKey(M::ImageDex2Oat)
@@ -518,9 +515,12 @@ bool ParsedOptions::DoParse(const RuntimeOptions& options,
     LOG(INFO) << "setting boot class path to " << *args.Get(M::BootClassPath);
   }
 
-  if (args.GetOrDefault(M::UseJitCompilation) && args.GetOrDefault(M::Interpret)) {
-    Usage("-Xusejit:true and -Xint cannot be specified together");
-    Exit(0);
+  if (args.GetOrDefault(M::Interpret)) {
+    if (args.Exists(M::UseJitCompilation) && *args.Get(M::UseJitCompilation)) {
+      Usage("-Xusejit:true and -Xint cannot be specified together\n");
+      Exit(0);
+    }
+    args.Set(M::UseJitCompilation, false);
   }
 
   // Set a default boot class path if we didn't get an explicit one via command line.
@@ -751,7 +751,7 @@ void ParsedOptions::Usage(const char* fmt, ...) {
   UsageMessage(stream, "  -Xcompiler:filename\n");
   UsageMessage(stream, "  -Xcompiler-option dex2oat-option\n");
   UsageMessage(stream, "  -Ximage-compiler-option dex2oat-option\n");
-  UsageMessage(stream, "  -Xpatchoat:filename\n");
+  UsageMessage(stream, "  -Xpatchoat:filename (obsolete, ignored)\n");
   UsageMessage(stream, "  -Xusejit:booleanvalue\n");
   UsageMessage(stream, "  -Xjitinitialsize:N\n");
   UsageMessage(stream, "  -Xjitmaxsize:N\n");

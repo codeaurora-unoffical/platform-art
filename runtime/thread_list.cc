@@ -199,7 +199,7 @@ void ThreadList::DumpUnattachedThreads(std::ostream& os, bool dump_native_stack)
 static constexpr uint32_t kDumpWaitTimeout = kIsTargetBuild ? 100000 : 20000;
 
 // A closure used by Thread::Dump.
-class DumpCheckpoint FINAL : public Closure {
+class DumpCheckpoint final : public Closure {
  public:
   DumpCheckpoint(std::ostream* os, bool dump_native_stack)
       : os_(os),
@@ -211,7 +211,7 @@ class DumpCheckpoint FINAL : public Closure {
     }
   }
 
-  void Run(Thread* thread) OVERRIDE {
+  void Run(Thread* thread) override {
     // Note thread and self may not be equal if thread was already suspended at the point of the
     // request.
     Thread* self = Thread::Current();
@@ -902,8 +902,6 @@ Thread* ThreadList::SuspendThreadByPeer(jobject peer,
                                         bool request_suspension,
                                         SuspendReason reason,
                                         bool* timed_out) {
-  CHECK_NE(reason, SuspendReason::kForUserCode) << "Cannot suspend for user-code by peer. Must be "
-                                                << "done directly on the thread.";
   const uint64_t start_time = NanoTime();
   useconds_t sleep_us = kThreadSuspendInitialSleepUs;
   *timed_out = false;

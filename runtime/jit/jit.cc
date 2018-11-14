@@ -399,7 +399,7 @@ void Jit::NewTypeLoadedIfUsingJit(mirror::Class* type) {
 
 void Jit::DumpTypeInfoForLoadedTypes(ClassLinker* linker) {
   struct CollectClasses : public ClassVisitor {
-    bool operator()(ObjPtr<mirror::Class> klass) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+    bool operator()(ObjPtr<mirror::Class> klass) override REQUIRES_SHARED(Locks::mutator_lock_) {
       classes_.push_back(klass.Ptr());
       return true;
     }
@@ -416,7 +416,7 @@ void Jit::DumpTypeInfoForLoadedTypes(ClassLinker* linker) {
 }
 
 extern "C" void art_quick_osr_stub(void** stack,
-                                   uint32_t stack_size_in_bytes,
+                                   size_t stack_size_in_bytes,
                                    const uint8_t* native_pc,
                                    JValue* result,
                                    const char* shorty,
@@ -576,7 +576,7 @@ void Jit::AddMemoryUsage(ArtMethod* method, size_t bytes) {
   memory_use_.AddValue(bytes);
 }
 
-class JitCompileTask FINAL : public Task {
+class JitCompileTask final : public Task {
  public:
   enum TaskKind {
     kAllocateProfile,
@@ -596,7 +596,7 @@ class JitCompileTask FINAL : public Task {
     soa.Vm()->DeleteGlobalRef(soa.Self(), klass_);
   }
 
-  void Run(Thread* self) OVERRIDE {
+  void Run(Thread* self) override {
     ScopedObjectAccess soa(self);
     if (kind_ == kCompile) {
       Runtime::Current()->GetJit()->CompileMethod(method_, self, /* osr */ false);
@@ -611,7 +611,7 @@ class JitCompileTask FINAL : public Task {
     ProfileSaver::NotifyJitActivity();
   }
 
-  void Finalize() OVERRIDE {
+  void Finalize() override {
     delete this;
   }
 
@@ -718,6 +718,22 @@ void Jit::AddSamples(Thread* self, ArtMethod* method, uint16_t count, bool with_
   method->SetCounter(new_count);
 }
 
+class ScopedSetRuntimeThread {
+ public:
+  explicit ScopedSetRuntimeThread(Thread* self)
+      : self_(self), was_runtime_thread_(self_->IsRuntimeThread()) {
+    self_->SetIsRuntimeThread(true);
+  }
+
+  ~ScopedSetRuntimeThread() {
+    self_->SetIsRuntimeThread(was_runtime_thread_);
+  }
+
+ private:
+  Thread* self_;
+  bool was_runtime_thread_;
+};
+
 void Jit::MethodEntered(Thread* thread, ArtMethod* method) {
   Runtime* runtime = Runtime::Current();
   if (UNLIKELY(runtime->UseJitCompilation() && runtime->GetJit()->JitAtFirstUse())) {
@@ -728,6 +744,8 @@ void Jit::MethodEntered(Thread* thread, ArtMethod* method) {
         ProfilingInfo::Create(thread, np_method, /* retry_allocation */ true);
       }
       JitCompileTask compile_task(method, JitCompileTask::kCompile);
+      // Fake being in a runtime thread so that class-load behavior will be the same as normal jit.
+      ScopedSetRuntimeThread ssrt(thread);
       compile_task.Run(thread);
     }
     return;

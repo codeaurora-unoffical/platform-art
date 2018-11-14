@@ -216,7 +216,6 @@ Runtime::Runtime()
       must_relocate_(false),
       is_concurrent_gc_enabled_(true),
       is_explicit_gc_disabled_(false),
-      dex2oat_enabled_(true),
       image_dex2oat_enabled_(true),
       default_stack_size_(0),
       heap_(nullptr),
@@ -696,15 +695,6 @@ static jobject CreateSystemClassLoader(Runtime* runtime) {
   return env->NewGlobalRef(system_class_loader.get());
 }
 
-std::string Runtime::GetPatchoatExecutable() const {
-  if (!patchoat_executable_.empty()) {
-    return patchoat_executable_;
-  }
-  std::string patchoat_executable(GetAndroidRoot());
-  patchoat_executable += (kIsDebugBuild ? "/bin/patchoatd" : "/bin/patchoat");
-  return patchoat_executable;
-}
-
 std::string Runtime::GetCompilerExecutable() const {
   if (!compiler_executable_.empty()) {
     return compiler_executable_;
@@ -1167,7 +1157,6 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
                                                  kPageSize,
                                                  PROT_NONE,
                                                  /* low_4g */ true,
-                                                 /* reuse */ false,
                                                  /* error_msg */ nullptr);
     if (!protected_fault_page_.IsValid()) {
       LOG(WARNING) << "Could not reserve sentinel fault page";
@@ -1192,11 +1181,9 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   properties_ = runtime_options.ReleaseOrDefault(Opt::PropertiesList);
 
   compiler_callbacks_ = runtime_options.GetOrDefault(Opt::CompilerCallbacksPtr);
-  patchoat_executable_ = runtime_options.ReleaseOrDefault(Opt::PatchOat);
   must_relocate_ = runtime_options.GetOrDefault(Opt::Relocate);
   is_zygote_ = runtime_options.Exists(Opt::Zygote);
   is_explicit_gc_disabled_ = runtime_options.Exists(Opt::DisableExplicitGC);
-  dex2oat_enabled_ = runtime_options.GetOrDefault(Opt::Dex2Oat);
   image_dex2oat_enabled_ = runtime_options.GetOrDefault(Opt::ImageDex2Oat);
   dump_native_stack_on_sig_quit_ = runtime_options.GetOrDefault(Opt::DumpNativeStackOnSigQuit);
 
@@ -1461,7 +1448,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   CHECK_EQ(self->GetThreadId(), ThreadList::kMainThreadId);
   CHECK(self != nullptr);
 
-  self->SetCanCallIntoJava(!IsAotCompiler());
+  self->SetIsRuntimeThread(IsAotCompiler());
 
   // Set us to runnable so tools using a runtime can allocate and GC by default
   self->TransitionFromSuspendedToRunnable();
@@ -2502,7 +2489,7 @@ void Runtime::CreateJit() {
 }
 
 bool Runtime::CanRelocate() const {
-  return !IsAotCompiler() || compiler_callbacks_->IsRelocationPossible();
+  return !IsAotCompiler();
 }
 
 bool Runtime::IsCompilingBootImage() const {
@@ -2639,7 +2626,7 @@ class UpdateEntryPointsClassVisitor : public ClassVisitor {
   explicit UpdateEntryPointsClassVisitor(instrumentation::Instrumentation* instrumentation)
       : instrumentation_(instrumentation) {}
 
-  bool operator()(ObjPtr<mirror::Class> klass) OVERRIDE REQUIRES(Locks::mutator_lock_) {
+  bool operator()(ObjPtr<mirror::Class> klass) override REQUIRES(Locks::mutator_lock_) {
     auto pointer_size = Runtime::Current()->GetClassLinker()->GetImagePointerSize();
     for (auto& m : klass->GetMethods(pointer_size)) {
       const void* code = m.GetEntryPointFromQuickCompiledCode();

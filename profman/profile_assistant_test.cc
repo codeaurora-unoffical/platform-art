@@ -40,7 +40,7 @@ static constexpr size_t kMaxMethodIds = 65535;
 
 class ProfileAssistantTest : public CommonRuntimeTest {
  public:
-  void PostRuntimeCreate() OVERRIDE {
+  void PostRuntimeCreate() override {
     allocator_.reset(new ArenaAllocator(Runtime::Current()->GetArenaPool()));
   }
 
@@ -116,9 +116,9 @@ class ProfileAssistantTest : public CommonRuntimeTest {
   void SetupBasicProfile(const std::string& id,
                          uint32_t checksum,
                          uint16_t number_of_methods,
-                         const std::vector<uint32_t> hot_methods,
-                         const std::vector<uint32_t> startup_methods,
-                         const std::vector<uint32_t> post_startup_methods,
+                         const std::vector<uint32_t>& hot_methods,
+                         const std::vector<uint32_t>& startup_methods,
+                         const std::vector<uint32_t>& post_startup_methods,
                          const ScratchFile& profile,
                          ProfileCompilationInfo* info) {
     std::string dex_location = "location1" + id;

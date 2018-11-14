@@ -159,14 +159,14 @@ class ShadowFrame {
   }
 
   int64_t GetVRegLong(size_t i) const {
-    DCHECK_LT(i, NumberOfVRegs());
+    DCHECK_LT(i + 1, NumberOfVRegs());
     const uint32_t* vreg = &vregs_[i];
     typedef const int64_t unaligned_int64 __attribute__ ((aligned (4)));
     return *reinterpret_cast<unaligned_int64*>(vreg);
   }
 
   double GetVRegDouble(size_t i) const {
-    DCHECK_LT(i, NumberOfVRegs());
+    DCHECK_LT(i + 1, NumberOfVRegs());
     const uint32_t* vreg = &vregs_[i];
     typedef const double unaligned_double __attribute__ ((aligned (4)));
     return *reinterpret_cast<unaligned_double*>(vreg);
@@ -220,7 +220,7 @@ class ShadowFrame {
   }
 
   void SetVRegLong(size_t i, int64_t val) {
-    DCHECK_LT(i, NumberOfVRegs());
+    DCHECK_LT(i + 1, NumberOfVRegs());
     uint32_t* vreg = &vregs_[i];
     typedef int64_t unaligned_int64 __attribute__ ((aligned (4)));
     *reinterpret_cast<unaligned_int64*>(vreg) = val;
@@ -233,7 +233,7 @@ class ShadowFrame {
   }
 
   void SetVRegDouble(size_t i, double val) {
-    DCHECK_LT(i, NumberOfVRegs());
+    DCHECK_LT(i + 1, NumberOfVRegs());
     uint32_t* vreg = &vregs_[i];
     typedef double unaligned_double __attribute__ ((aligned (4)));
     *reinterpret_cast<unaligned_double*>(vreg) = val;
@@ -279,47 +279,47 @@ class ShadowFrame {
     return lock_count_data_;
   }
 
-  static size_t LockCountDataOffset() {
+  static constexpr size_t LockCountDataOffset() {
     return OFFSETOF_MEMBER(ShadowFrame, lock_count_data_);
   }
 
-  static size_t LinkOffset() {
+  static constexpr size_t LinkOffset() {
     return OFFSETOF_MEMBER(ShadowFrame, link_);
   }
 
-  static size_t MethodOffset() {
+  static constexpr size_t MethodOffset() {
     return OFFSETOF_MEMBER(ShadowFrame, method_);
   }
 
-  static size_t DexPCOffset() {
+  static constexpr size_t DexPCOffset() {
     return OFFSETOF_MEMBER(ShadowFrame, dex_pc_);
   }
 
-  static size_t NumberOfVRegsOffset() {
+  static constexpr size_t NumberOfVRegsOffset() {
     return OFFSETOF_MEMBER(ShadowFrame, number_of_vregs_);
   }
 
-  static size_t VRegsOffset() {
+  static constexpr size_t VRegsOffset() {
     return OFFSETOF_MEMBER(ShadowFrame, vregs_);
   }
 
-  static size_t ResultRegisterOffset() {
+  static constexpr size_t ResultRegisterOffset() {
     return OFFSETOF_MEMBER(ShadowFrame, result_register_);
   }
 
-  static size_t DexPCPtrOffset() {
+  static constexpr size_t DexPCPtrOffset() {
     return OFFSETOF_MEMBER(ShadowFrame, dex_pc_ptr_);
   }
 
-  static size_t DexInstructionsOffset() {
+  static constexpr size_t DexInstructionsOffset() {
     return OFFSETOF_MEMBER(ShadowFrame, dex_instructions_);
   }
 
-  static size_t CachedHotnessCountdownOffset() {
+  static constexpr size_t CachedHotnessCountdownOffset() {
     return OFFSETOF_MEMBER(ShadowFrame, cached_hotness_countdown_);
   }
 
-  static size_t HotnessCountdownOffset() {
+  static constexpr size_t HotnessCountdownOffset() {
     return OFFSETOF_MEMBER(ShadowFrame, hotness_countdown_);
   }
 

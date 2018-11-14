@@ -85,7 +85,7 @@ class InstallStubsClassVisitor : public ClassVisitor {
   explicit InstallStubsClassVisitor(Instrumentation* instrumentation)
       : instrumentation_(instrumentation) {}
 
-  bool operator()(ObjPtr<mirror::Class> klass) OVERRIDE REQUIRES(Locks::mutator_lock_) {
+  bool operator()(ObjPtr<mirror::Class> klass) override REQUIRES(Locks::mutator_lock_) {
     instrumentation_->InstallStubsForClass(klass.Ptr());
     return true;  // we visit all classes.
   }
@@ -160,7 +160,6 @@ Instrumentation::Instrumentation()
       have_exception_thrown_listeners_(false),
       have_watched_frame_pop_listeners_(false),
       have_branch_listeners_(false),
-      have_invoke_virtual_or_interface_listeners_(false),
       have_exception_handled_listeners_(false),
       deoptimized_methods_lock_("deoptimized methods lock", kGenericBottomLock),
       deoptimization_enabled_(false),
@@ -264,7 +263,7 @@ void Instrumentation::InstallStubsForMethod(ArtMethod* method) {
 // existing instrumentation frames.
 static void InstrumentationInstallStack(Thread* thread, void* arg)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  struct InstallStackVisitor FINAL : public StackVisitor {
+  struct InstallStackVisitor final : public StackVisitor {
     InstallStackVisitor(Thread* thread_in, Context* context, uintptr_t instrumentation_exit_pc)
         : StackVisitor(thread_in, context, kInstrumentationStackWalk),
           instrumentation_stack_(thread_in->GetInstrumentationStack()),
@@ -273,7 +272,7 @@ static void InstrumentationInstallStack(Thread* thread, void* arg)
           last_return_pc_(0) {
     }
 
-    bool VisitFrame() OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+    bool VisitFrame() override REQUIRES_SHARED(Locks::mutator_lock_) {
       ArtMethod* m = GetMethod();
       if (m == nullptr) {
         if (kVerboseInstrumentation) {
@@ -429,7 +428,7 @@ static void InstrumentationRestoreStack(Thread* thread, void* arg)
     REQUIRES(Locks::mutator_lock_) {
   Locks::mutator_lock_->AssertExclusiveHeld(Thread::Current());
 
-  struct RestoreStackVisitor FINAL : public StackVisitor {
+  struct RestoreStackVisitor final : public StackVisitor {
     RestoreStackVisitor(Thread* thread_in, uintptr_t instrumentation_exit_pc,
                         Instrumentation* instrumentation)
         : StackVisitor(thread_in, nullptr, kInstrumentationStackWalk),
@@ -439,7 +438,7 @@ static void InstrumentationRestoreStack(Thread* thread, void* arg)
           instrumentation_stack_(thread_in->GetInstrumentationStack()),
           frames_removed_(0) {}
 
-    bool VisitFrame() OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+    bool VisitFrame() override REQUIRES_SHARED(Locks::mutator_lock_) {
       if (instrumentation_stack_->size() == 0) {
         return false;  // Stop.
       }
@@ -562,11 +561,6 @@ void Instrumentation::AddListener(InstrumentationListener* listener, uint32_t ev
                            branch_listeners_,
                            listener,
                            &have_branch_listeners_);
-  PotentiallyAddListenerTo(kInvokeVirtualOrInterface,
-                           events,
-                           invoke_virtual_or_interface_listeners_,
-                           listener,
-                           &have_invoke_virtual_or_interface_listeners_);
   PotentiallyAddListenerTo(kDexPcMoved,
                            events,
                            dex_pc_listeners_,
@@ -649,11 +643,6 @@ void Instrumentation::RemoveListener(InstrumentationListener* listener, uint32_t
                                 branch_listeners_,
                                 listener,
                                 &have_branch_listeners_);
-  PotentiallyRemoveListenerFrom(kInvokeVirtualOrInterface,
-                                events,
-                                invoke_virtual_or_interface_listeners_,
-                                listener,
-                                &have_invoke_virtual_or_interface_listeners_);
   PotentiallyRemoveListenerFrom(kDexPcMoved,
                                 events,
                                 dex_pc_listeners_,
@@ -1213,21 +1202,6 @@ void Instrumentation::BranchImpl(Thread* thread,
   }
 }
 
-void Instrumentation::InvokeVirtualOrInterfaceImpl(Thread* thread,
-                                                   ObjPtr<mirror::Object> this_object,
-                                                   ArtMethod* caller,
-                                                   uint32_t dex_pc,
-                                                   ArtMethod* callee) const {
-  Thread* self = Thread::Current();
-  StackHandleScope<1> hs(self);
-  Handle<mirror::Object> thiz(hs.NewHandle(this_object));
-  for (InstrumentationListener* listener : invoke_virtual_or_interface_listeners_) {
-    if (listener != nullptr) {
-      listener->InvokeVirtualOrInterface(thread, thiz, caller, dex_pc, callee);
-    }
-  }
-}
-
 void Instrumentation::WatchedFramePopImpl(Thread* thread, const ShadowFrame& frame) const {
   for (InstrumentationListener* listener : watched_frame_pop_listeners_) {
     if (listener != nullptr) {
@@ -1385,7 +1359,7 @@ struct RuntimeMethodShortyVisitor : public StackVisitor {
       : StackVisitor(thread, nullptr, StackVisitor::StackWalkKind::kIncludeInlinedFrames),
         shorty('V') {}
 
-  bool VisitFrame() REQUIRES_SHARED(Locks::mutator_lock_) {
+  bool VisitFrame() override REQUIRES_SHARED(Locks::mutator_lock_) {
     ArtMethod* m = GetMethod();
     if (m != nullptr && !m->IsRuntimeMethod()) {
       // The first Java method.

@@ -22,6 +22,7 @@ echo "that do not exist. It can also miss on reflection uses."
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 if [[ -e ${SCRIPT_DIR}/veridex && \
+      -e ${SCRIPT_DIR}/hiddenapi-whitelist.txt && \
       -e ${SCRIPT_DIR}/hiddenapi-blacklist.txt && \
       -e ${SCRIPT_DIR}/hiddenapi-light-greylist.txt && \
       -e ${SCRIPT_DIR}/hiddenapi-dark-greylist.txt && \
@@ -29,6 +30,7 @@ if [[ -e ${SCRIPT_DIR}/veridex && \
       -e ${SCRIPT_DIR}/system-stubs.zip ]]; then
   exec ${SCRIPT_DIR}/veridex \
     --core-stubs=${SCRIPT_DIR}/system-stubs.zip:${SCRIPT_DIR}/org.apache.http.legacy-stubs.zip \
+    --whitelist=${SCRIPT_DIR}/hiddenapi-whitelist.txt \
     --blacklist=${SCRIPT_DIR}/hiddenapi-blacklist.txt \
     --light-greylist=${SCRIPT_DIR}/hiddenapi-light-greylist.txt \
     --dark-greylist=${SCRIPT_DIR}/hiddenapi-dark-greylist.txt \
@@ -43,8 +45,8 @@ if [ ! -d art ]; then
 fi
 
 # Logic for setting out_dir from build/make/core/envsetup.mk:
-if [[ -z $OUT_DIR ]]; then
-  if [[ -z $OUT_DIR_COMMON_BASE ]]; then
+if [[ -z "${OUT_DIR}" ]]; then
+  if [[ -z "${OUT_DIR_COMMON_BASE}" ]]; then
     OUT=out
   else
     OUT=${OUT_DIR_COMMON_BASE}/${PWD##*/}
@@ -53,15 +55,18 @@ else
   OUT=${OUT_DIR}
 fi
 
-PACKAGING=${OUT}/target/common/obj/PACKAGING
+if [[ -z "${PACKAGING}" ]]; then
+  PACKAGING=${OUT}/target/common/obj/PACKAGING
+fi
 
-if [ -z "$ANDROID_HOST_OUT" ] ; then
+if [[ -z "${ANDROID_HOST_OUT}" ]]; then
   ANDROID_HOST_OUT=${OUT}/host/linux-x86
 fi
 
 
 ${ANDROID_HOST_OUT}/bin/veridex \
     --core-stubs=${PACKAGING}/core_dex_intermediates/classes.dex:${PACKAGING}/oahl_dex_intermediates/classes.dex \
+    --whitelist=${PACKAGING}/hiddenapi-whitelist.txt \
     --blacklist=${PACKAGING}/hiddenapi-blacklist.txt \
     --light-greylist=${PACKAGING}/hiddenapi-light-greylist.txt \
     --dark-greylist=${PACKAGING}/hiddenapi-dark-greylist.txt \

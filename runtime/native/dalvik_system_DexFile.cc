@@ -177,7 +177,6 @@ static MemMap AllocateDexMemoryMap(JNIEnv* env, jint start, jint end) {
                                             length,
                                             PROT_READ | PROT_WRITE,
                                             /* low_4gb */ false,
-                                            /* reuse */ false,
                                             &error_message);
   if (!dex_mem_map.IsValid()) {
     ScopedObjectAccess soa(env);
@@ -324,6 +323,9 @@ static jboolean DexFile_closeDexFile(JNIEnv* env, jclass, jobject cookie) {
   }
   Runtime* const runtime = Runtime::Current();
   bool all_deleted = true;
+  // We need to clear the caches since they may contain pointers to the dex instructions.
+  // Different dex file can be loaded at the same memory location later by chance.
+  Thread::ClearAllInterpreterCaches();
   {
     ScopedObjectAccess soa(env);
     ObjPtr<mirror::Object> dex_files_object = soa.Decode<mirror::Object>(cookie);

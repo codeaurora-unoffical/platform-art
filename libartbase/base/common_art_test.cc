@@ -73,11 +73,11 @@ ScratchFile::ScratchFile(File* file) {
   file_.reset(file);
 }
 
-ScratchFile::ScratchFile(ScratchFile&& other) {
+ScratchFile::ScratchFile(ScratchFile&& other) noexcept {
   *this = std::move(other);
 }
 
-ScratchFile& ScratchFile::operator=(ScratchFile&& other) {
+ScratchFile& ScratchFile::operator=(ScratchFile&& other) noexcept {
   if (GetFile() != other.GetFile()) {
     std::swap(filename_, other.filename_);
     std::swap(file_, other.file_);
@@ -318,7 +318,8 @@ static std::string GetDexFileName(const std::string& jar_prefix, bool host) {
 
 std::vector<std::string> CommonArtTestImpl::GetLibCoreDexFileNames() {
   return std::vector<std::string>({GetDexFileName("core-oj", IsHost()),
-                                   GetDexFileName("core-libart", IsHost())});
+                                   GetDexFileName("core-libart", IsHost()),
+                                   GetDexFileName("core-simple", IsHost())});
 }
 
 std::string CommonArtTestImpl::GetTestAndroidRoot() {

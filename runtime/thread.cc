@@ -25,6 +25,12 @@
 #include <sys/resource.h>
 #include <sys/time.h>
 
+#if __has_feature(hwaddress_sanitizer)
+#include <sanitizer/hwasan_interface.h>
+#else
+#define __hwasan_tag_pointer(p, t) (p)
+#endif
+
 #include <algorithm>
 #include <bitset>
 #include <cerrno>
@@ -623,7 +629,9 @@ void Thread::InstallImplicitProtection() {
 #endif
       volatile char space[kPageSize - (kAsanMultiplier * 256)];
       char sink ATTRIBUTE_UNUSED = space[zero];  // NOLINT
-      if (reinterpret_cast<uintptr_t>(space) >= target + kPageSize) {
+      // Remove tag from the pointer. Nop in non-hwasan builds.
+      uintptr_t addr = reinterpret_cast<uintptr_t>(__hwasan_tag_pointer(space, 0));
+      if (addr >= target + kPageSize) {
         Touch(target);
       }
       zero *= 2;  // Try to avoid tail recursion.
@@ -1228,34 +1236,6 @@ static void UnsafeLogFatalForSuspendCount(Thread* self, Thread* thread) NO_THREA
   LOG(FATAL) << ss.str();
 }
 
-void Thread::SetCanBeSuspendedByUserCode(bool can_be_suspended_by_user_code) {
-  CHECK_EQ(this, Thread::Current()) << "This function may only be called on the current thread. "
-                                    << *Thread::Current() << " tried to modify the suspendability "
-                                    << "of " << *this;
-  // NB This checks the new value! This ensures that we can only set can_be_suspended_by_user_code
-  // to false if !CanCallIntoJava().
-  DCHECK(!CanCallIntoJava() || can_be_suspended_by_user_code)
-      << "Threads able to call into java may not be marked as unsuspendable!";
-  if (can_be_suspended_by_user_code == CanBeSuspendedByUserCode()) {
-    // Don't need to do anything if nothing is changing.
-    return;
-  }
-  art::MutexLock mu(this, *Locks::user_code_suspension_lock_);
-  art::MutexLock thread_list_mu(this, *Locks::thread_suspend_count_lock_);
-
-  // We want to add the user-code suspend count if we are newly allowing user-code suspends and
-  // remove them if we are disabling them.
-  int adj = can_be_suspended_by_user_code ? GetUserCodeSuspendCount() : -GetUserCodeSuspendCount();
-  // Adjust the global suspend count appropriately. Use kInternal to not change the ForUserCode
-  // count.
-  if (adj != 0) {
-    bool suspend = ModifySuspendCountInternal(this, adj, nullptr, SuspendReason::kInternal);
-    CHECK(suspend) << this << " was unable to modify it's own suspend count!";
-  }
-  // Mark thread as accepting user-code suspensions.
-  can_be_suspended_by_user_code_ = can_be_suspended_by_user_code;
-}
-
 bool Thread::ModifySuspendCountInternal(Thread* self,
                                         int delta,
                                         AtomicInteger* suspend_barrier,
@@ -1276,17 +1256,6 @@ bool Thread::ModifySuspendCountInternal(Thread* self,
     if (UNLIKELY(delta + tls32_.user_code_suspend_count < 0)) {
       LOG(ERROR) << "attempting to modify suspend count in an illegal way.";
       return false;
-    }
-    DCHECK(this == self || this->IsSuspended())
-        << "Only self kForUserCode suspension on an unsuspended thread is allowed: " << this;
-    if (UNLIKELY(!CanBeSuspendedByUserCode())) {
-      VLOG(threads) << this << " is being requested to suspend for user code but that is disabled "
-                    << "the thread will not actually go to sleep.";
-      // Having the user_code_suspend_count still be around is useful but we don't need to actually
-      // do anything since we aren't going to 'really' suspend. Just adjust the
-      // user_code_suspend_count and return.
-      tls32_.user_code_suspend_count += delta;
-      return true;
     }
   }
   if (UNLIKELY(delta < 0 && tls32_.suspend_count <= 0)) {
@@ -1486,7 +1455,7 @@ class BarrierClosure : public Closure {
  public:
   explicit BarrierClosure(Closure* wrapped) : wrapped_(wrapped), barrier_(0) {}
 
-  void Run(Thread* self) OVERRIDE {
+  void Run(Thread* self) override {
     wrapped_->Run(self);
     barrier_.Pass(self);
   }
@@ -1844,7 +1813,7 @@ struct StackDumpVisitor : public MonitorObjectsStackVisitor {
   static constexpr size_t kMaxRepetition = 3u;
 
   VisitMethodResult StartMethod(ArtMethod* m, size_t frame_nr ATTRIBUTE_UNUSED)
-      OVERRIDE
+      override
       REQUIRES_SHARED(Locks::mutator_lock_) {
     m = m->GetInterfaceMethodIfProxy(kRuntimePointerSize);
     ObjPtr<mirror::Class> c = m->GetDeclaringClass();
@@ -1883,24 +1852,24 @@ struct StackDumpVisitor : public MonitorObjectsStackVisitor {
     return VisitMethodResult::kContinueMethod;
   }
 
-  VisitMethodResult EndMethod(ArtMethod* m ATTRIBUTE_UNUSED) OVERRIDE {
+  VisitMethodResult EndMethod(ArtMethod* m ATTRIBUTE_UNUSED) override {
     return VisitMethodResult::kContinueMethod;
   }
 
   void VisitWaitingObject(mirror::Object* obj, ThreadState state ATTRIBUTE_UNUSED)
-      OVERRIDE
+      override
       REQUIRES_SHARED(Locks::mutator_lock_) {
     PrintObject(obj, "  - waiting on ", ThreadList::kInvalidThreadId);
   }
   void VisitSleepingObject(mirror::Object* obj)
-      OVERRIDE
+      override
       REQUIRES_SHARED(Locks::mutator_lock_) {
     PrintObject(obj, "  - sleeping on ", ThreadList::kInvalidThreadId);
   }
   void VisitBlockedOnObject(mirror::Object* obj,
                             ThreadState state,
                             uint32_t owner_tid)
-      OVERRIDE
+      override
       REQUIRES_SHARED(Locks::mutator_lock_) {
     const char* msg;
     switch (state) {
@@ -1919,7 +1888,7 @@ struct StackDumpVisitor : public MonitorObjectsStackVisitor {
     PrintObject(obj, msg, owner_tid);
   }
   void VisitLockedObject(mirror::Object* obj)
-      OVERRIDE
+      override
       REQUIRES_SHARED(Locks::mutator_lock_) {
     PrintObject(obj, "  - locked ", ThreadList::kInvalidThreadId);
   }
@@ -2148,8 +2117,7 @@ void Thread::NotifyThreadGroup(ScopedObjectAccessAlreadyRunnable& soa, jobject t
 Thread::Thread(bool daemon)
     : tls32_(daemon),
       wait_monitor_(nullptr),
-      can_call_into_java_(true),
-      can_be_suspended_by_user_code_(true) {
+      is_runtime_thread_(false) {
   wait_mutex_ = new Mutex("a thread wait mutex");
   wait_cond_ = new ConditionVariable("a thread wait condition variable", *wait_mutex_);
   tlsPtr_.instrumentation_stack = new std::deque<instrumentation::InstrumentationStackFrame>;
@@ -2171,6 +2139,10 @@ Thread::Thread(bool daemon)
   tlsPtr_.flip_function = nullptr;
   tlsPtr_.thread_local_mark_stack = nullptr;
   tls32_.is_transitioning_to_runnable = false;
+}
+
+bool Thread::CanLoadClasses() const {
+  return !IsRuntimeThread() || !Runtime::Current()->IsJavaDebuggable();
 }
 
 bool Thread::IsStillStarting() const {
@@ -2216,7 +2188,7 @@ class MonitorExitVisitor : public SingleRootVisitor {
 
   // NO_THREAD_SAFETY_ANALYSIS due to MonitorExit.
   void VisitRoot(mirror::Object* entered_monitor, const RootInfo& info ATTRIBUTE_UNUSED)
-      OVERRIDE NO_THREAD_SAFETY_ANALYSIS {
+      override NO_THREAD_SAFETY_ANALYSIS {
     if (self_->HoldsLock(entered_monitor)) {
       LOG(WARNING) << "Calling MonitorExit on object "
                    << entered_monitor << " (" << entered_monitor->PrettyTypeOf() << ")"
@@ -2507,7 +2479,7 @@ class FetchStackTraceVisitor : public StackVisitor {
         saved_frames_(saved_frames),
         max_saved_frames_(max_saved_frames) {}
 
-  bool VisitFrame() REQUIRES_SHARED(Locks::mutator_lock_) {
+  bool VisitFrame() override REQUIRES_SHARED(Locks::mutator_lock_) {
     // We want to skip frames up to and including the exception's constructor.
     // Note we also skip the frame if it doesn't have a method (namely the callee
     // save frame)
@@ -2595,7 +2567,7 @@ class BuildInternalStackTraceVisitor : public StackVisitor {
     self_->EndAssertNoThreadSuspension(nullptr);
   }
 
-  bool VisitFrame() REQUIRES_SHARED(Locks::mutator_lock_) {
+  bool VisitFrame() override REQUIRES_SHARED(Locks::mutator_lock_) {
     if (trace_ == nullptr) {
       return true;  // We're probably trying to fillInStackTrace for an OutOfMemoryError.
     }
@@ -2845,7 +2817,7 @@ jobjectArray Thread::CreateAnnotatedStackTrace(const ScopedObjectAccessAlreadyRu
 
    protected:
     VisitMethodResult StartMethod(ArtMethod* m, size_t frame_nr ATTRIBUTE_UNUSED)
-        OVERRIDE
+        override
         REQUIRES_SHARED(Locks::mutator_lock_) {
       ObjPtr<mirror::StackTraceElement> obj = CreateStackTraceElement(
           soaa_, m, GetDexPc(/* abort on error */ false));
@@ -2856,7 +2828,7 @@ jobjectArray Thread::CreateAnnotatedStackTrace(const ScopedObjectAccessAlreadyRu
       return VisitMethodResult::kContinueMethod;
     }
 
-    VisitMethodResult EndMethod(ArtMethod* m ATTRIBUTE_UNUSED) OVERRIDE {
+    VisitMethodResult EndMethod(ArtMethod* m ATTRIBUTE_UNUSED) override {
       lock_objects_.push_back({});
       lock_objects_[lock_objects_.size() - 1].swap(frame_lock_objects_);
 
@@ -2866,24 +2838,24 @@ jobjectArray Thread::CreateAnnotatedStackTrace(const ScopedObjectAccessAlreadyRu
     }
 
     void VisitWaitingObject(mirror::Object* obj, ThreadState state ATTRIBUTE_UNUSED)
-        OVERRIDE
+        override
         REQUIRES_SHARED(Locks::mutator_lock_) {
       wait_jobject_.reset(soaa_.AddLocalReference<jobject>(obj));
     }
     void VisitSleepingObject(mirror::Object* obj)
-        OVERRIDE
+        override
         REQUIRES_SHARED(Locks::mutator_lock_) {
       wait_jobject_.reset(soaa_.AddLocalReference<jobject>(obj));
     }
     void VisitBlockedOnObject(mirror::Object* obj,
                               ThreadState state ATTRIBUTE_UNUSED,
                               uint32_t owner_tid ATTRIBUTE_UNUSED)
-        OVERRIDE
+        override
         REQUIRES_SHARED(Locks::mutator_lock_) {
       block_jobject_.reset(soaa_.AddLocalReference<jobject>(obj));
     }
     void VisitLockedObject(mirror::Object* obj)
-        OVERRIDE
+        override
         REQUIRES_SHARED(Locks::mutator_lock_) {
       frame_lock_objects_.emplace_back(soaa_.Env(), soaa_.AddLocalReference<jobject>(obj));
     }
@@ -3139,8 +3111,10 @@ void Thread::ThrowNewWrappedException(const char* exception_class_descriptor,
 }
 
 void Thread::ThrowOutOfMemoryError(const char* msg) {
-  LOG(WARNING) << StringPrintf("Throwing OutOfMemoryError \"%s\"%s",
-      msg, (tls32_.throwing_OutOfMemoryError ? " (recursive case)" : ""));
+  LOG(WARNING) << "Throwing OutOfMemoryError "
+               << '"' << msg << '"'
+               << " (VmSize " << GetProcessStatus("VmSize")
+               << (tls32_.throwing_OutOfMemoryError ? ", recursive case)" : ")");
   if (!tls32_.throwing_OutOfMemoryError) {
     tls32_.throwing_OutOfMemoryError = true;
     ThrowNewException("Ljava/lang/OutOfMemoryError;", msg);
@@ -3448,45 +3422,37 @@ Context* Thread::GetLongJumpContext() {
   return result;
 }
 
-// Note: this visitor may return with a method set, but dex_pc_ being DexFile:kDexNoIndex. This is
-//       so we don't abort in a special situation (thinlocked monitor) when dumping the Java stack.
-struct CurrentMethodVisitor FINAL : public StackVisitor {
-  CurrentMethodVisitor(Thread* thread, Context* context, bool check_suspended, bool abort_on_error)
-      REQUIRES_SHARED(Locks::mutator_lock_)
-      : StackVisitor(thread,
-                     context,
-                     StackVisitor::StackWalkKind::kIncludeInlinedFrames,
-                     check_suspended),
-        this_object_(nullptr),
-        method_(nullptr),
-        dex_pc_(0),
-        abort_on_error_(abort_on_error) {}
-  bool VisitFrame() OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
-    ArtMethod* m = GetMethod();
-    if (m->IsRuntimeMethod()) {
-      // Continue if this is a runtime method.
-      return true;
-    }
-    if (context_ != nullptr) {
-      this_object_ = GetThisObject();
-    }
-    method_ = m;
-    dex_pc_ = GetDexPc(abort_on_error_);
-    return false;
-  }
-  ObjPtr<mirror::Object> this_object_;
-  ArtMethod* method_;
-  uint32_t dex_pc_;
-  const bool abort_on_error_;
-};
-
 ArtMethod* Thread::GetCurrentMethod(uint32_t* dex_pc,
                                     bool check_suspended,
                                     bool abort_on_error) const {
-  CurrentMethodVisitor visitor(const_cast<Thread*>(this),
-                               nullptr,
-                               check_suspended,
-                               abort_on_error);
+  // Note: this visitor may return with a method set, but dex_pc_ being DexFile:kDexNoIndex. This is
+  //       so we don't abort in a special situation (thinlocked monitor) when dumping the Java
+  //       stack.
+  struct CurrentMethodVisitor final : public StackVisitor {
+    CurrentMethodVisitor(Thread* thread, bool check_suspended, bool abort_on_error)
+        REQUIRES_SHARED(Locks::mutator_lock_)
+        : StackVisitor(thread,
+                       /* context= */nullptr,
+            StackVisitor::StackWalkKind::kIncludeInlinedFrames,
+            check_suspended),
+            method_(nullptr),
+            dex_pc_(0),
+            abort_on_error_(abort_on_error) {}
+    bool VisitFrame() override REQUIRES_SHARED(Locks::mutator_lock_) {
+      ArtMethod* m = GetMethod();
+      if (m->IsRuntimeMethod()) {
+        // Continue if this is a runtime method.
+        return true;
+      }
+      method_ = m;
+      dex_pc_ = GetDexPc(abort_on_error_);
+      return false;
+    }
+    ArtMethod* method_;
+    uint32_t dex_pc_;
+    const bool abort_on_error_;
+  };
+  CurrentMethodVisitor visitor(const_cast<Thread*>(this), check_suspended, abort_on_error);
   visitor.WalkStack(false);
   if (dex_pc != nullptr) {
     *dex_pc = visitor.dex_pc_;
@@ -3512,7 +3478,7 @@ class ReferenceMapVisitor : public StackVisitor {
       : StackVisitor(thread, context, StackVisitor::StackWalkKind::kSkipInlinedFrames),
         visitor_(visitor) {}
 
-  bool VisitFrame() REQUIRES_SHARED(Locks::mutator_lock_) {
+  bool VisitFrame() override REQUIRES_SHARED(Locks::mutator_lock_) {
     if (false) {
       LOG(INFO) << "Visiting stack roots in " << ArtMethod::PrettyMethod(GetMethod())
                 << StringPrintf("@ PC:%04x", GetDexPc());
@@ -3857,7 +3823,7 @@ void Thread::VisitRoots(RootVisitor* visitor, VisitRootFlags flags) {
 class VerifyRootVisitor : public SingleRootVisitor {
  public:
   void VisitRoot(mirror::Object* root, const RootInfo& info ATTRIBUTE_UNUSED)
-      OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+      override REQUIRES_SHARED(Locks::mutator_lock_) {
     VerifyObject(root);
   }
 };
@@ -4066,6 +4032,15 @@ mirror::Object* Thread::GetPeerFromOtherThread() const {
 void Thread::SetReadBarrierEntrypoints() {
   // Make sure entrypoints aren't null.
   UpdateReadBarrierEntrypoints(&tlsPtr_.quick_entrypoints, /* is_active*/ true);
+}
+
+void Thread::ClearAllInterpreterCaches() {
+  static struct ClearInterpreterCacheClosure : Closure {
+    virtual void Run(Thread* thread) {
+      thread->GetInterpreterCache()->Clear(thread);
+    }
+  } closure;
+  Runtime::Current()->GetThreadList()->RunCheckpoint(&closure);
 }
 
 }  // namespace art

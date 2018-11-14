@@ -383,7 +383,7 @@ class NullCheckSlowPathARMVIXL : public SlowPathCodeARMVIXL {
  public:
   explicit NullCheckSlowPathARMVIXL(HNullCheck* instruction) : SlowPathCodeARMVIXL(instruction) {}
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     CodeGeneratorARMVIXL* arm_codegen = down_cast<CodeGeneratorARMVIXL*>(codegen);
     __ Bind(GetEntryLabel());
     if (instruction_->CanThrowIntoCatchBlock()) {
@@ -397,9 +397,9 @@ class NullCheckSlowPathARMVIXL : public SlowPathCodeARMVIXL {
     CheckEntrypointTypes<kQuickThrowNullPointer, void, void>();
   }
 
-  bool IsFatal() const OVERRIDE { return true; }
+  bool IsFatal() const override { return true; }
 
-  const char* GetDescription() const OVERRIDE { return "NullCheckSlowPathARMVIXL"; }
+  const char* GetDescription() const override { return "NullCheckSlowPathARMVIXL"; }
 
  private:
   DISALLOW_COPY_AND_ASSIGN(NullCheckSlowPathARMVIXL);
@@ -410,16 +410,16 @@ class DivZeroCheckSlowPathARMVIXL : public SlowPathCodeARMVIXL {
   explicit DivZeroCheckSlowPathARMVIXL(HDivZeroCheck* instruction)
       : SlowPathCodeARMVIXL(instruction) {}
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     CodeGeneratorARMVIXL* arm_codegen = down_cast<CodeGeneratorARMVIXL*>(codegen);
     __ Bind(GetEntryLabel());
     arm_codegen->InvokeRuntime(kQuickThrowDivZero, instruction_, instruction_->GetDexPc(), this);
     CheckEntrypointTypes<kQuickThrowDivZero, void, void>();
   }
 
-  bool IsFatal() const OVERRIDE { return true; }
+  bool IsFatal() const override { return true; }
 
-  const char* GetDescription() const OVERRIDE { return "DivZeroCheckSlowPathARMVIXL"; }
+  const char* GetDescription() const override { return "DivZeroCheckSlowPathARMVIXL"; }
 
  private:
   DISALLOW_COPY_AND_ASSIGN(DivZeroCheckSlowPathARMVIXL);
@@ -430,7 +430,7 @@ class SuspendCheckSlowPathARMVIXL : public SlowPathCodeARMVIXL {
   SuspendCheckSlowPathARMVIXL(HSuspendCheck* instruction, HBasicBlock* successor)
       : SlowPathCodeARMVIXL(instruction), successor_(successor) {}
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     CodeGeneratorARMVIXL* arm_codegen = down_cast<CodeGeneratorARMVIXL*>(codegen);
     __ Bind(GetEntryLabel());
     arm_codegen->InvokeRuntime(kQuickTestSuspend, instruction_, instruction_->GetDexPc(), this);
@@ -451,7 +451,7 @@ class SuspendCheckSlowPathARMVIXL : public SlowPathCodeARMVIXL {
     return successor_;
   }
 
-  const char* GetDescription() const OVERRIDE { return "SuspendCheckSlowPathARMVIXL"; }
+  const char* GetDescription() const override { return "SuspendCheckSlowPathARMVIXL"; }
 
  private:
   // If not null, the block to branch to after the suspend check.
@@ -468,7 +468,7 @@ class BoundsCheckSlowPathARMVIXL : public SlowPathCodeARMVIXL {
   explicit BoundsCheckSlowPathARMVIXL(HBoundsCheck* instruction)
       : SlowPathCodeARMVIXL(instruction) {}
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     CodeGeneratorARMVIXL* arm_codegen = down_cast<CodeGeneratorARMVIXL*>(codegen);
     LocationSummary* locations = instruction_->GetLocations();
 
@@ -495,9 +495,9 @@ class BoundsCheckSlowPathARMVIXL : public SlowPathCodeARMVIXL {
     CheckEntrypointTypes<kQuickThrowArrayBounds, void, int32_t, int32_t>();
   }
 
-  bool IsFatal() const OVERRIDE { return true; }
+  bool IsFatal() const override { return true; }
 
-  const char* GetDescription() const OVERRIDE { return "BoundsCheckSlowPathARMVIXL"; }
+  const char* GetDescription() const override { return "BoundsCheckSlowPathARMVIXL"; }
 
  private:
   DISALLOW_COPY_AND_ASSIGN(BoundsCheckSlowPathARMVIXL);
@@ -511,7 +511,7 @@ class LoadClassSlowPathARMVIXL : public SlowPathCodeARMVIXL {
     DCHECK_EQ(instruction_->IsLoadClass(), cls_ == instruction_);
   }
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     LocationSummary* locations = instruction_->GetLocations();
     Location out = locations->Out();
     const uint32_t dex_pc = instruction_->GetDexPc();
@@ -549,7 +549,7 @@ class LoadClassSlowPathARMVIXL : public SlowPathCodeARMVIXL {
     __ B(GetExitLabel());
   }
 
-  const char* GetDescription() const OVERRIDE { return "LoadClassSlowPathARMVIXL"; }
+  const char* GetDescription() const override { return "LoadClassSlowPathARMVIXL"; }
 
  private:
   // The class this slow path will load.
@@ -563,7 +563,7 @@ class LoadStringSlowPathARMVIXL : public SlowPathCodeARMVIXL {
   explicit LoadStringSlowPathARMVIXL(HLoadString* instruction)
       : SlowPathCodeARMVIXL(instruction) {}
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     DCHECK(instruction_->IsLoadString());
     DCHECK_EQ(instruction_->AsLoadString()->GetLoadKind(), HLoadString::LoadKind::kBssEntry);
     LocationSummary* locations = instruction_->GetLocations();
@@ -585,7 +585,7 @@ class LoadStringSlowPathARMVIXL : public SlowPathCodeARMVIXL {
     __ B(GetExitLabel());
   }
 
-  const char* GetDescription() const OVERRIDE { return "LoadStringSlowPathARMVIXL"; }
+  const char* GetDescription() const override { return "LoadStringSlowPathARMVIXL"; }
 
  private:
   DISALLOW_COPY_AND_ASSIGN(LoadStringSlowPathARMVIXL);
@@ -596,7 +596,7 @@ class TypeCheckSlowPathARMVIXL : public SlowPathCodeARMVIXL {
   TypeCheckSlowPathARMVIXL(HInstruction* instruction, bool is_fatal)
       : SlowPathCodeARMVIXL(instruction), is_fatal_(is_fatal) {}
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     LocationSummary* locations = instruction_->GetLocations();
     DCHECK(instruction_->IsCheckCast()
            || !locations->GetLiveRegisters()->ContainsCoreRegister(locations->Out().reg()));
@@ -640,9 +640,9 @@ class TypeCheckSlowPathARMVIXL : public SlowPathCodeARMVIXL {
     }
   }
 
-  const char* GetDescription() const OVERRIDE { return "TypeCheckSlowPathARMVIXL"; }
+  const char* GetDescription() const override { return "TypeCheckSlowPathARMVIXL"; }
 
-  bool IsFatal() const OVERRIDE { return is_fatal_; }
+  bool IsFatal() const override { return is_fatal_; }
 
  private:
   const bool is_fatal_;
@@ -655,7 +655,7 @@ class DeoptimizationSlowPathARMVIXL : public SlowPathCodeARMVIXL {
   explicit DeoptimizationSlowPathARMVIXL(HDeoptimize* instruction)
       : SlowPathCodeARMVIXL(instruction) {}
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     CodeGeneratorARMVIXL* arm_codegen = down_cast<CodeGeneratorARMVIXL*>(codegen);
     __ Bind(GetEntryLabel());
         LocationSummary* locations = instruction_->GetLocations();
@@ -668,7 +668,7 @@ class DeoptimizationSlowPathARMVIXL : public SlowPathCodeARMVIXL {
     CheckEntrypointTypes<kQuickDeoptimize, void, DeoptimizationKind>();
   }
 
-  const char* GetDescription() const OVERRIDE { return "DeoptimizationSlowPathARMVIXL"; }
+  const char* GetDescription() const override { return "DeoptimizationSlowPathARMVIXL"; }
 
  private:
   DISALLOW_COPY_AND_ASSIGN(DeoptimizationSlowPathARMVIXL);
@@ -678,7 +678,7 @@ class ArraySetSlowPathARMVIXL : public SlowPathCodeARMVIXL {
  public:
   explicit ArraySetSlowPathARMVIXL(HInstruction* instruction) : SlowPathCodeARMVIXL(instruction) {}
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     LocationSummary* locations = instruction_->GetLocations();
     __ Bind(GetEntryLabel());
     SaveLiveRegisters(codegen, locations);
@@ -709,7 +709,7 @@ class ArraySetSlowPathARMVIXL : public SlowPathCodeARMVIXL {
     __ B(GetExitLabel());
   }
 
-  const char* GetDescription() const OVERRIDE { return "ArraySetSlowPathARMVIXL"; }
+  const char* GetDescription() const override { return "ArraySetSlowPathARMVIXL"; }
 
  private:
   DISALLOW_COPY_AND_ASSIGN(ArraySetSlowPathARMVIXL);
@@ -744,7 +744,7 @@ class ReadBarrierForHeapReferenceSlowPathARMVIXL : public SlowPathCodeARMVIXL {
     DCHECK(!obj.Equals(ref)) << "obj=" << obj << " ref=" << ref;
   }
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     CodeGeneratorARMVIXL* arm_codegen = down_cast<CodeGeneratorARMVIXL*>(codegen);
     LocationSummary* locations = instruction_->GetLocations();
     vixl32::Register reg_out = RegisterFrom(out_);
@@ -868,7 +868,7 @@ class ReadBarrierForHeapReferenceSlowPathARMVIXL : public SlowPathCodeARMVIXL {
     __ B(GetExitLabel());
   }
 
-  const char* GetDescription() const OVERRIDE {
+  const char* GetDescription() const override {
     return "ReadBarrierForHeapReferenceSlowPathARMVIXL";
   }
 
@@ -910,7 +910,7 @@ class ReadBarrierForRootSlowPathARMVIXL : public SlowPathCodeARMVIXL {
     DCHECK(kEmitCompilerReadBarrier);
   }
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     LocationSummary* locations = instruction_->GetLocations();
     vixl32::Register reg_out = RegisterFrom(out_);
     DCHECK(locations->CanCall());
@@ -936,7 +936,7 @@ class ReadBarrierForRootSlowPathARMVIXL : public SlowPathCodeARMVIXL {
     __ B(GetExitLabel());
   }
 
-  const char* GetDescription() const OVERRIDE { return "ReadBarrierForRootSlowPathARMVIXL"; }
+  const char* GetDescription() const override { return "ReadBarrierForRootSlowPathARMVIXL"; }
 
  private:
   const Location out_;
@@ -2677,6 +2677,18 @@ void InstructionCodeGeneratorARMVIXL::VisitSelect(HSelect* select) {
   const Location first = locations->InAt(0);
   const Location out = locations->Out();
   const Location second = locations->InAt(1);
+
+  // In the unlucky case the output of this instruction overlaps
+  // with an input of an "emitted-at-use-site" condition, and
+  // the output of this instruction is not one of its inputs, we'll
+  // need to fallback to branches instead of conditional ARM instructions.
+  bool output_overlaps_with_condition_inputs =
+      !IsBooleanValueOrMaterializedCondition(condition) &&
+      !out.Equals(first) &&
+      !out.Equals(second) &&
+      (condition->GetLocations()->InAt(0).Equals(out) ||
+       condition->GetLocations()->InAt(1).Equals(out));
+  DCHECK(!output_overlaps_with_condition_inputs || condition->IsCondition());
   Location src;
 
   if (condition->IsIntConstant()) {
@@ -2690,7 +2702,7 @@ void InstructionCodeGeneratorARMVIXL::VisitSelect(HSelect* select) {
     return;
   }
 
-  if (!DataType::IsFloatingPointType(type)) {
+  if (!DataType::IsFloatingPointType(type) && !output_overlaps_with_condition_inputs) {
     bool invert = false;
 
     if (out.Equals(second)) {
@@ -2762,6 +2774,7 @@ void InstructionCodeGeneratorARMVIXL::VisitSelect(HSelect* select) {
   vixl32::Label* false_target = nullptr;
   vixl32::Label* true_target = nullptr;
   vixl32::Label select_end;
+  vixl32::Label other_case;
   vixl32::Label* const target = codegen_->GetFinalLabel(select, &select_end);
 
   if (out.Equals(second)) {
@@ -2772,12 +2785,21 @@ void InstructionCodeGeneratorARMVIXL::VisitSelect(HSelect* select) {
     src = second;
 
     if (!out.Equals(first)) {
-      codegen_->MoveLocation(out, first, type);
+      if (output_overlaps_with_condition_inputs) {
+        false_target = &other_case;
+      } else {
+        codegen_->MoveLocation(out, first, type);
+      }
     }
   }
 
   GenerateTestAndBranch(select, 2, true_target, false_target, /* far_target */ false);
   codegen_->MoveLocation(out, src, type);
+  if (output_overlaps_with_condition_inputs) {
+    __ B(target);
+    __ Bind(&other_case);
+    codegen_->MoveLocation(out, first, type);
+  }
 
   if (select_end.IsReferenced()) {
     __ Bind(&select_end);
@@ -2876,31 +2898,16 @@ void CodeGeneratorARMVIXL::GenerateConditionWithZero(IfCondition condition,
 void LocationsBuilderARMVIXL::HandleCondition(HCondition* cond) {
   LocationSummary* locations =
       new (GetGraph()->GetAllocator()) LocationSummary(cond, LocationSummary::kNoCall);
-  // Handle the long/FP comparisons made in instruction simplification.
-  switch (cond->InputAt(0)->GetType()) {
-    case DataType::Type::kInt64:
-      locations->SetInAt(0, Location::RequiresRegister());
-      locations->SetInAt(1, Location::RegisterOrConstant(cond->InputAt(1)));
-      if (!cond->IsEmittedAtUseSite()) {
-        locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
-      }
-      break;
-
-    case DataType::Type::kFloat32:
-    case DataType::Type::kFloat64:
-      locations->SetInAt(0, Location::RequiresFpuRegister());
-      locations->SetInAt(1, ArithmeticZeroOrFpuRegister(cond->InputAt(1)));
-      if (!cond->IsEmittedAtUseSite()) {
-        locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
-      }
-      break;
-
-    default:
-      locations->SetInAt(0, Location::RequiresRegister());
-      locations->SetInAt(1, Location::RegisterOrConstant(cond->InputAt(1)));
-      if (!cond->IsEmittedAtUseSite()) {
-        locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
-      }
+  const DataType::Type type = cond->InputAt(0)->GetType();
+  if (DataType::IsFloatingPointType(type)) {
+    locations->SetInAt(0, Location::RequiresFpuRegister());
+    locations->SetInAt(1, ArithmeticZeroOrFpuRegister(cond->InputAt(1)));
+  } else {
+    locations->SetInAt(0, Location::RequiresRegister());
+    locations->SetInAt(1, Location::RegisterOrConstant(cond->InputAt(1)));
+  }
+  if (!cond->IsEmittedAtUseSite()) {
+    locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
   }
 }
 
@@ -4964,7 +4971,7 @@ void InstructionCodeGeneratorARMVIXL::HandleShift(HBinaryOperation* op) {
             __ Rrx(o_l, low);
           }
         } else {
-          DCHECK(2 <= shift_value && shift_value < 32) << shift_value;
+          DCHECK(0 <= shift_value && shift_value < 32) << shift_value;
           if (op->IsShl()) {
             __ Lsl(o_h, high, shift_value);
             __ Orr(o_h, o_h, Operand(low, ShiftType::LSR, 32 - shift_value));
@@ -8650,7 +8657,7 @@ void CodeGeneratorARMVIXL::GenerateReadBarrierForRootSlow(HInstruction* instruct
 // otherwise return a fall-back info that should be used instead.
 HInvokeStaticOrDirect::DispatchInfo CodeGeneratorARMVIXL::GetSupportedInvokeStaticOrDirectDispatch(
     const HInvokeStaticOrDirect::DispatchInfo& desired_dispatch_info,
-    HInvokeStaticOrDirect* invoke ATTRIBUTE_UNUSED) {
+    ArtMethod* method ATTRIBUTE_UNUSED) {
   return desired_dispatch_info;
 }
 

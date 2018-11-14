@@ -40,7 +40,7 @@ enum class StringCompressionFlag : uint32_t {
 };
 
 // C++ mirror of java.lang.String
-class MANAGED String FINAL : public Object {
+class MANAGED String final : public Object {
  public:
   // Size of java.lang.String.class.
   static uint32_t ClassSize(PointerSize pointer_size);
@@ -50,11 +50,11 @@ class MANAGED String FINAL : public Object {
     return sizeof(String);
   }
 
-  static MemberOffset CountOffset() {
+  static constexpr MemberOffset CountOffset() {
     return OFFSET_OF_OBJECT_MEMBER(String, count_);
   }
 
-  static MemberOffset ValueOffset() {
+  static constexpr MemberOffset ValueOffset() {
     return OFFSET_OF_OBJECT_MEMBER(String, value_);
   }
 

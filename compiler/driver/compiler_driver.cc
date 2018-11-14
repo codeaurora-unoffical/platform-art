@@ -971,7 +971,7 @@ class ResolveCatchBlockExceptionsClassVisitor : public ClassVisitor {
  public:
   ResolveCatchBlockExceptionsClassVisitor() : classes_() {}
 
-  virtual bool operator()(ObjPtr<mirror::Class> c) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+  bool operator()(ObjPtr<mirror::Class> c) override REQUIRES_SHARED(Locks::mutator_lock_) {
     classes_.push_back(c);
     return true;
   }
@@ -1034,7 +1034,7 @@ class RecordImageClassesVisitor : public ClassVisitor {
   explicit RecordImageClassesVisitor(HashSet<std::string>* image_classes)
       : image_classes_(image_classes) {}
 
-  bool operator()(ObjPtr<mirror::Class> klass) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+  bool operator()(ObjPtr<mirror::Class> klass) override REQUIRES_SHARED(Locks::mutator_lock_) {
     std::string temp;
     image_classes_->insert(klass->GetDescriptor(&temp));
     return true;
@@ -1210,7 +1210,7 @@ class ClinitImageUpdate {
         : data_(data),
           hs_(hs) {}
 
-    bool operator()(ObjPtr<mirror::Class> klass) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+    bool operator()(ObjPtr<mirror::Class> klass) override REQUIRES_SHARED(Locks::mutator_lock_) {
       std::string temp;
       StringPiece name(klass->GetDescriptor(&temp));
       if (data_->image_class_descriptors_->find(name) != data_->image_class_descriptors_->end()) {
@@ -1475,7 +1475,7 @@ class ParallelCompilationManager {
           end_(end),
           fn_(fn) {}
 
-    void Run(Thread* self) OVERRIDE {
+    void Run(Thread* self) override {
       while (true) {
         const size_t index = manager_->NextIndex();
         if (UNLIKELY(index >= end_)) {
@@ -1486,7 +1486,7 @@ class ParallelCompilationManager {
       }
     }
 
-    void Finalize() OVERRIDE {
+    void Finalize() override {
       delete this;
     }
 
@@ -1568,7 +1568,7 @@ class ResolveClassFieldsAndMethodsVisitor : public CompilationVisitor {
   explicit ResolveClassFieldsAndMethodsVisitor(const ParallelCompilationManager* manager)
       : manager_(manager) {}
 
-  void Visit(size_t class_def_index) OVERRIDE REQUIRES(!Locks::mutator_lock_) {
+  void Visit(size_t class_def_index) override REQUIRES(!Locks::mutator_lock_) {
     ScopedTrace trace(__FUNCTION__);
     Thread* const self = Thread::Current();
     jobject jclass_loader = manager_->GetClassLoader();
@@ -1667,7 +1667,7 @@ class ResolveTypeVisitor : public CompilationVisitor {
  public:
   explicit ResolveTypeVisitor(const ParallelCompilationManager* manager) : manager_(manager) {
   }
-  void Visit(size_t type_idx) OVERRIDE REQUIRES(!Locks::mutator_lock_) {
+  void Visit(size_t type_idx) override REQUIRES(!Locks::mutator_lock_) {
   // Class derived values are more complicated, they require the linker and loader.
     ScopedObjectAccess soa(Thread::Current());
     ClassLinker* class_linker = manager_->GetClassLinker();
@@ -1886,9 +1886,11 @@ void CompilerDriver::Verify(jobject jclass_loader,
 class VerifyClassVisitor : public CompilationVisitor {
  public:
   VerifyClassVisitor(const ParallelCompilationManager* manager, verifier::HardFailLogMode log_level)
-     : manager_(manager), log_level_(log_level) {}
+     : manager_(manager),
+       log_level_(log_level),
+       sdk_version_(Runtime::Current()->GetTargetSdkVersion()) {}
 
-  virtual void Visit(size_t class_def_index) REQUIRES(!Locks::mutator_lock_) OVERRIDE {
+  void Visit(size_t class_def_index) REQUIRES(!Locks::mutator_lock_) override {
     ScopedTrace trace(__FUNCTION__);
     ScopedObjectAccess soa(Thread::Current());
     const DexFile& dex_file = *manager_->GetDexFile();
@@ -1923,6 +1925,7 @@ class VerifyClassVisitor : public CompilationVisitor {
                                                 Runtime::Current()->GetCompilerCallbacks(),
                                                 true /* allow soft failures */,
                                                 log_level_,
+                                                sdk_version_,
                                                 &error_msg);
       if (failure_kind == verifier::FailureKind::kHardFailure) {
         LOG(ERROR) << "Verification failed on class " << PrettyDescriptor(descriptor)
@@ -1995,6 +1998,7 @@ class VerifyClassVisitor : public CompilationVisitor {
  private:
   const ParallelCompilationManager* const manager_;
   const verifier::HardFailLogMode log_level_;
+  const uint32_t sdk_version_;
 };
 
 void CompilerDriver::VerifyDexFile(jobject class_loader,
@@ -2020,7 +2024,7 @@ class SetVerifiedClassVisitor : public CompilationVisitor {
  public:
   explicit SetVerifiedClassVisitor(const ParallelCompilationManager* manager) : manager_(manager) {}
 
-  virtual void Visit(size_t class_def_index) REQUIRES(!Locks::mutator_lock_) OVERRIDE {
+  void Visit(size_t class_def_index) REQUIRES(!Locks::mutator_lock_) override {
     ScopedTrace trace(__FUNCTION__);
     ScopedObjectAccess soa(Thread::Current());
     const DexFile& dex_file = *manager_->GetDexFile();
@@ -2085,7 +2089,7 @@ class InitializeClassVisitor : public CompilationVisitor {
  public:
   explicit InitializeClassVisitor(const ParallelCompilationManager* manager) : manager_(manager) {}
 
-  void Visit(size_t class_def_index) OVERRIDE {
+  void Visit(size_t class_def_index) override {
     ScopedTrace trace(__FUNCTION__);
     jobject jclass_loader = manager_->GetClassLoader();
     const DexFile& dex_file = *manager_->GetDexFile();
@@ -2153,10 +2157,9 @@ class InitializeClassVisitor : public CompilationVisitor {
         // Otherwise it's in app image but superclasses can't be initialized, no need to proceed.
         old_status = klass->GetStatus();
 
-        bool too_many_encoded_fields = false;
-        if (!is_boot_image && klass->NumStaticFields() > kMaxEncodedFields) {
-          too_many_encoded_fields = true;
-        }
+        bool too_many_encoded_fields = !is_boot_image &&
+            klass->NumStaticFields() > kMaxEncodedFields;
+
         // If the class was not initialized, we can proceed to see if we can initialize static
         // fields. Limit the max number of encoded fields.
         if (!klass->IsInitialized() &&
@@ -2206,9 +2209,13 @@ class InitializeClassVisitor : public CompilationVisitor {
               if (success) {
                 runtime->ExitTransactionMode();
                 DCHECK(!runtime->IsActiveTransaction());
-              }
 
-              if (!success) {
+                if (is_boot_image) {
+                  // For boot image, we want to put the updated status in the oat class since we
+                  // can't reject the image anyways.
+                  old_status = klass->GetStatus();
+                }
+              } else {
                 CHECK(soa.Self()->IsExceptionPending());
                 mirror::Throwable* exception = soa.Self()->GetException();
                 VLOG(compiler) << "Initialization of " << descriptor << " aborted because of "
@@ -2222,10 +2229,6 @@ class InitializeClassVisitor : public CompilationVisitor {
                 soa.Self()->ClearException();
                 runtime->RollbackAllTransactions();
                 CHECK_EQ(old_status, klass->GetStatus()) << "Previous class status not restored";
-              } else if (is_boot_image) {
-                // For boot image, we want to put the updated status in the oat class since we can't
-                // reject the image anyways.
-                old_status = klass->GetStatus();
               }
             }
 
@@ -2470,7 +2473,7 @@ class InitializeArrayClassesAndCreateConflictTablesVisitor : public ClassVisitor
   explicit InitializeArrayClassesAndCreateConflictTablesVisitor(VariableSizedHandleScope& hs)
       : hs_(hs) {}
 
-  virtual bool operator()(ObjPtr<mirror::Class> klass) OVERRIDE
+  bool operator()(ObjPtr<mirror::Class> klass) override
       REQUIRES_SHARED(Locks::mutator_lock_) {
     if (Runtime::Current()->GetHeap()->ObjectIsInBootImageSpace(klass)) {
       return true;
@@ -2560,8 +2563,8 @@ static void CompileDexFile(CompilerDriver* driver,
                                      thread_pool);
 
   auto compile = [&context, &compile_fn](size_t class_def_index) {
-    ScopedTrace trace(__FUNCTION__);
     const DexFile& dex_file = *context.GetDexFile();
+    SCOPED_TRACE << "compile " << dex_file.GetLocation() << "@" << class_def_index;
     ClassLinker* class_linker = context.GetClassLinker();
     jobject jclass_loader = context.GetClassLoader();
     ClassReference ref(&dex_file, class_def_index);
@@ -2643,7 +2646,7 @@ void CompilerDriver::Compile(jobject class_loader,
     LOG(INFO) << "[ProfileGuidedCompilation] " <<
         ((profile_compilation_info_ == nullptr)
             ? "null"
-            : profile_compilation_info_->DumpInfo(&dex_files));
+            : profile_compilation_info_->DumpInfo(dex_files));
   }
 
   dex_to_dex_compiler_.ClearState();

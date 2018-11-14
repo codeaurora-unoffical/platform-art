@@ -325,14 +325,14 @@ static void VMRuntime_runHeapTasks(JNIEnv* env, jobject) {
   Runtime::Current()->GetHeap()->GetTaskProcessor()->RunAllTasks(ThreadForEnv(env));
 }
 
-typedef std::map<std::string, ObjPtr<mirror::String>> StringTable;
+using StringTable = std::map<std::string, ObjPtr<mirror::String>>;
 
 class PreloadDexCachesStringsVisitor : public SingleRootVisitor {
  public:
   explicit PreloadDexCachesStringsVisitor(StringTable* table) : table_(table) { }
 
   void VisitRoot(mirror::Object* root, const RootInfo& info ATTRIBUTE_UNUSED)
-      OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+      override REQUIRES_SHARED(Locks::mutator_lock_) {
     ObjPtr<mirror::String> string = root->AsString();
     table_->operator[](string->ToModifiedUtf8()) = string;
   }

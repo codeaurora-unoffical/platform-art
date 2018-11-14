@@ -69,14 +69,14 @@ FILE* gOutFile = stdout;
 /*
  * Data types that match the definitions in the VM specification.
  */
-typedef uint8_t  u1;
-typedef uint16_t u2;
-typedef uint32_t u4;
-typedef uint64_t u8;
-typedef int8_t   s1;
-typedef int16_t  s2;
-typedef int32_t  s4;
-typedef int64_t  s8;
+using u1 = uint8_t;
+using u2 = uint16_t;
+using u4 = uint32_t;
+using u8 = uint64_t;
+using s1 = int8_t;
+using s2 = int16_t;
+using s4 = int32_t;
+using s8 = int64_t;
 
 /*
  * Basic information about a field or a method.
@@ -123,8 +123,7 @@ static const char* primitiveTypeLabel(char typeChar) {
 /*
  * Converts a type descriptor to human-readable "dotted" form.  For
  * example, "Ljava/lang/String;" becomes "java.lang.String", and
- * "[I" becomes "int[]".  Also converts '$' to '.', which means this
- * form can't be converted back to a descriptor.
+ * "[I" becomes "int[]".
  */
 static std::unique_ptr<char[]> descriptorToDot(const char* str) {
   int targetLen = strlen(str);
@@ -157,7 +156,7 @@ static std::unique_ptr<char[]> descriptorToDot(const char* str) {
   int i = 0;
   for (; i < targetLen; i++) {
     const char ch = str[offset + i];
-    newStr[i] = (ch == '/' || ch == '$') ? '.' : ch;
+    newStr[i] = (ch == '/') ? '.' : ch;
   }  // for
 
   // Add the appropriate number of brackets for arrays.
@@ -171,10 +170,9 @@ static std::unique_ptr<char[]> descriptorToDot(const char* str) {
 }
 
 /*
- * Converts the class name portion of a type descriptor to human-readable
- * "dotted" form. For example, "Ljava/lang/String;" becomes "String".
+ * Retrieves the class name portion of a type descriptor.
  */
-static std::unique_ptr<char[]> descriptorClassToDot(const char* str) {
+static std::unique_ptr<char[]> descriptorClassToName(const char* str) {
   // Reduce to just the class name prefix.
   const char* lastSlash = strrchr(str, '/');
   if (lastSlash == nullptr) {
@@ -187,8 +185,7 @@ static std::unique_ptr<char[]> descriptorClassToDot(const char* str) {
   const int targetLen = strlen(lastSlash);
   std::unique_ptr<char[]> newStr(new char[targetLen]);
   for (int i = 0; i < targetLen - 1; i++) {
-    const char ch = lastSlash[i];
-    newStr[i] = ch == '$' ? '.' : ch;
+    newStr[i] = lastSlash[i];
   }  // for
   newStr[targetLen - 1] = '\0';
   return newStr;
@@ -334,7 +331,7 @@ static char* createAccessFlagStr(u4 flags, AccessFor forWhat) {
  * NULL-terminated.
  */
 static void asciify(char* out, const unsigned char* data, size_t len) {
-  while (len--) {
+  for (; len != 0u; --len) {
     if (*data < 0x20) {
       // Could do more here, but we don't need them yet.
       switch (*data) {
@@ -751,24 +748,6 @@ static void dumpCatches(const DexFile* pDexFile, const DexFile::CodeItem* pCode)
       fprintf(gOutFile, "          %s -> 0x%04x\n", descriptor, it.GetHandlerAddress());
     }  // for
   }  // for
-}
-
-/*
- * Callback for dumping each positions table entry.
- */
-static bool dumpPositionsCb(void* /*context*/, const DexFile::PositionInfo& entry) {
-  fprintf(gOutFile, "        0x%04x line=%d\n", entry.address_, entry.line_);
-  return false;
-}
-
-/*
- * Callback for dumping locals table entry.
- */
-static void dumpLocalsCb(void* /*context*/, const DexFile::LocalInfo& entry) {
-  const char* signature = entry.signature_ != nullptr ? entry.signature_ : "";
-  fprintf(gOutFile, "        0x%04x - 0x%04x reg=%d %s %s %s\n",
-          entry.start_address_, entry.end_address_, entry.reg_,
-          entry.name_, entry.descriptor_, signature);
 }
 
 /*
@@ -1204,9 +1183,24 @@ static void dumpCode(const DexFile* pDexFile, u4 idx, u4 flags,
   // Positions and locals table in the debug info.
   bool is_static = (flags & kAccStatic) != 0;
   fprintf(gOutFile, "      positions     : \n");
-  pDexFile->DecodeDebugPositionInfo(accessor.DebugInfoOffset(), dumpPositionsCb, nullptr);
+  accessor.DecodeDebugPositionInfo([&](const DexFile::PositionInfo& entry) {
+    fprintf(gOutFile, "        0x%04x line=%d\n", entry.address_, entry.line_);
+    return false;
+  });
   fprintf(gOutFile, "      locals        : \n");
-  accessor.DecodeDebugLocalInfo(is_static, idx, dumpLocalsCb, nullptr);
+  accessor.DecodeDebugLocalInfo(is_static,
+                                idx,
+                                [&](const DexFile::LocalInfo& entry) {
+    const char* signature = entry.signature_ != nullptr ? entry.signature_ : "";
+    fprintf(gOutFile,
+            "        0x%04x - 0x%04x reg=%d %s %s %s\n",
+            entry.start_address_,
+            entry.end_address_,
+            entry.reg_,
+            entry.name_,
+            entry.descriptor_,
+            signature);
+  });
 }
 
 /*
@@ -1250,7 +1244,7 @@ static void dumpMethod(const ClassAccessor::Method& method, int i) {
 
     // Method name and prototype.
     if (constructor) {
-      std::unique_ptr<char[]> dot(descriptorClassToDot(backDescriptor));
+      std::unique_ptr<char[]> dot(descriptorClassToName(backDescriptor));
       fprintf(gOutFile, "<constructor name=\"%s\"\n", dot.get());
       dot = descriptorToDot(backDescriptor);
       fprintf(gOutFile, " type=\"%s\"\n", dot.get());
@@ -1469,7 +1463,7 @@ static void dumpClass(const DexFile* pDexFile, int idx, char** pLastPackage) {
     }
     fprintf(gOutFile, "  Interfaces        -\n");
   } else {
-    std::unique_ptr<char[]> dot(descriptorClassToDot(classDescriptor));
+    std::unique_ptr<char[]> dot(descriptorClassToName(classDescriptor));
     fprintf(gOutFile, "<class name=\"%s\"\n", dot.get());
     if (superclassDescriptor != nullptr) {
       dot = descriptorToDot(superclassDescriptor);
@@ -1806,18 +1800,18 @@ static void processDexFile(const char* fileName,
   // Iterate over all classes.
   char* package = nullptr;
   const u4 classDefsSize = pDexFile->GetHeader().class_defs_size_;
-  for (u4 i = 0; i < classDefsSize; i++) {
-    dumpClass(pDexFile, i, &package);
+  for (u4 j = 0; j < classDefsSize; j++) {
+    dumpClass(pDexFile, j, &package);
   }  // for
 
   // Iterate over all method handles.
-  for (u4 i = 0; i < pDexFile->NumMethodHandles(); ++i) {
-    dumpMethodHandle(pDexFile, i);
+  for (u4 j = 0; j < pDexFile->NumMethodHandles(); ++j) {
+    dumpMethodHandle(pDexFile, j);
   }  // for
 
   // Iterate over all call site ids.
-  for (u4 i = 0; i < pDexFile->NumCallSiteIds(); ++i) {
-    dumpCallSite(pDexFile, i);
+  for (u4 j = 0; j < pDexFile->NumCallSiteIds(); ++j) {
+    dumpCallSite(pDexFile, j);
   }  // for
 
   // Free the last package allocated.

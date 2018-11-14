@@ -42,11 +42,11 @@ static const char* kProgramName = "dexlayout";
 /*
  * Shows usage.
  */
-static void Usage(void) {
+static void Usage() {
   LOG(ERROR) << "Copyright (C) 2016 The Android Open Source Project\n";
   LOG(ERROR) << kProgramName
              << ": [-a] [-c] [-d] [-e] [-f] [-h] [-i] [-l layout] [-o outfile] [-p profile]"
-                " [-s] [-t] [-v] [-w directory] dexfile...\n";
+                " [-s] [-t] [-u] [-v] [-w directory] dexfile...\n";
   LOG(ERROR) << " -a : display annotations";
   LOG(ERROR) << " -b : build dex_ir";
   LOG(ERROR) << " -c : verify checksum and exit";
@@ -60,6 +60,7 @@ static void Usage(void) {
   LOG(ERROR) << " -p : profile file name (defaults to no profile)";
   LOG(ERROR) << " -s : visualize reference pattern";
   LOG(ERROR) << " -t : display file section sizes";
+  LOG(ERROR) << " -u : update dex checksums";
   LOG(ERROR) << " -v : verify output file is canonical to input (IR level comparison)";
   LOG(ERROR) << " -w : output dex directory";
   LOG(ERROR) << " -x : compact dex generation level, either 'none' or 'fast'";
@@ -84,8 +85,8 @@ int DexlayoutDriver(int argc, char** argv) {
   bool want_usage = false;
 
   // Parse all arguments.
-  while (1) {
-    const int ic = getopt(argc, argv, "abcdefghil:o:p:stvw:x:");
+  while (true) {
+    const int ic = getopt(argc, argv, "abcdefghil:o:p:stuvw:x:");
     if (ic < 0) {
       break;  // done
     }
@@ -137,6 +138,9 @@ int DexlayoutDriver(int argc, char** argv) {
       case 't':  // display section statistics
         options.show_section_statistics_ = true;
         options.verbose_ = false;
+        break;
+      case 'u':  // update checksum
+        options.update_checksum_ = true;
         break;
       case 'v':  // verify output
         options.verify_output_ = true;

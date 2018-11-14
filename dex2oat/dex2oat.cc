@@ -613,14 +613,12 @@ class WatchDog {
   bool shutting_down_;
 };
 
-class Dex2Oat FINAL {
+class Dex2Oat final {
  public:
   explicit Dex2Oat(TimingLogger* timings) :
       compiler_kind_(Compiler::kOptimizing),
       // Take the default set of instruction features from the build.
       image_file_location_oat_checksum_(0),
-      image_file_location_oat_data_begin_(0),
-      image_patch_delta_(0),
       key_value_store_(nullptr),
       verification_results_(nullptr),
       runtime_(nullptr),
@@ -1012,25 +1010,6 @@ class Dex2Oat FINAL {
 
     base_img = base_img.substr(0, last_img_slash + 1);
 
-    // Note: we have some special case here for our testing. We have to inject the differentiating
-    //       parts for the different core images.
-    std::string infix;  // Empty infix by default.
-    {
-      // Check the first name.
-      std::string dex_file = oat_filenames_[0];
-      size_t last_dex_slash = dex_file.rfind('/');
-      if (last_dex_slash != std::string::npos) {
-        dex_file = dex_file.substr(last_dex_slash + 1);
-      }
-      size_t last_dex_dot = dex_file.rfind('.');
-      if (last_dex_dot != std::string::npos) {
-        dex_file = dex_file.substr(0, last_dex_dot);
-      }
-      if (android::base::StartsWith(dex_file, "core-")) {
-        infix = dex_file.substr(strlen("core"));
-      }
-    }
-
     std::string base_symbol_oat;
     if (!oat_unstripped_.empty()) {
       base_symbol_oat = oat_unstripped_[0];
@@ -1044,11 +1023,11 @@ class Dex2Oat FINAL {
     // Now create the other names. Use a counted loop to skip the first one.
     for (size_t i = 1; i < dex_locations_.size(); ++i) {
       // TODO: Make everything properly std::string.
-      std::string image_name = CreateMultiImageName(dex_locations_[i], prefix, infix, ".art");
+      std::string image_name = CreateMultiImageName(dex_locations_[i], prefix, ".art");
       char_backing_storage_.push_front(base_img + image_name);
       image_filenames_.push_back(char_backing_storage_.front().c_str());
 
-      std::string oat_name = CreateMultiImageName(dex_locations_[i], prefix, infix, ".oat");
+      std::string oat_name = CreateMultiImageName(dex_locations_[i], prefix, ".oat");
       char_backing_storage_.push_front(base_oat + oat_name);
       oat_filenames_.push_back(char_backing_storage_.front().c_str());
 
@@ -1063,11 +1042,9 @@ class Dex2Oat FINAL {
   //   0) Assume input is /a/b/c.d
   //   1) Strip the path  -> c.d
   //   2) Inject prefix p -> pc.d
-  //   3) Inject infix i  -> pci.d
-  //   4) Replace suffix with s if it's "jar"  -> d == "jar" -> pci.s
+  //   3) Replace suffix with s if it's "jar"  -> d == "jar" -> pc.s
   static std::string CreateMultiImageName(std::string in,
                                           const std::string& prefix,
-                                          const std::string& infix,
                                           const char* replace_suffix) {
     size_t last_dex_slash = in.rfind('/');
     if (last_dex_slash != std::string::npos) {
@@ -1075,13 +1052,6 @@ class Dex2Oat FINAL {
     }
     if (!prefix.empty()) {
       in = prefix + in;
-    }
-    if (!infix.empty()) {
-      // Inject infix.
-      size_t last_dot = in.rfind('.');
-      if (last_dot != std::string::npos) {
-        in.insert(last_dot, infix);
-      }
     }
     if (android::base::EndsWith(in, ".jar")) {
       in = in.substr(0, in.length() - strlen(".jar")) +
@@ -1104,9 +1074,6 @@ class Dex2Oat FINAL {
     }
     oss << kRuntimeISA;
     key_value_store_->Put(OatHeader::kDex2OatHostKey, oss.str());
-    key_value_store_->Put(
-        OatHeader::kPicKey,
-        compiler_options_->compile_pic_ ? OatHeader::kTrueValue : OatHeader::kFalseValue);
     key_value_store_->Put(
         OatHeader::kDebuggableKey,
         compiler_options_->debuggable_ ? OatHeader::kTrueValue : OatHeader::kFalseValue);
@@ -1348,12 +1315,12 @@ class Dex2Oat FINAL {
         }
       }
     } else {
-      std::unique_ptr<File> oat_file(new File(oat_fd_, oat_location_, /* check_usage */ true));
-      if (oat_file == nullptr) {
+      std::unique_ptr<File> oat_file(
+          new File(DupCloexec(oat_fd_), oat_location_, /* check_usage */ true));
+      if (!oat_file->IsOpened()) {
         PLOG(ERROR) << "Failed to create oat file: " << oat_location_;
         return false;
       }
-      oat_file->DisableAutoClose();
       if (oat_file->SetLength(0) != 0) {
         PLOG(WARNING) << "Truncating oat file " << oat_location_ << " failed.";
         oat_file->Erase();
@@ -1385,12 +1352,12 @@ class Dex2Oat FINAL {
 
       DCHECK_NE(output_vdex_fd_, -1);
       std::string vdex_location = ReplaceFileExtension(oat_location_, "vdex");
-      std::unique_ptr<File> vdex_file(new File(output_vdex_fd_, vdex_location, /* check_usage */ true));
-      if (vdex_file == nullptr) {
+      std::unique_ptr<File> vdex_file(new File(
+          DupCloexec(output_vdex_fd_), vdex_location, /* check_usage */ true));
+      if (!vdex_file->IsOpened()) {
         PLOG(ERROR) << "Failed to create vdex file: " << vdex_location;
         return false;
       }
-      vdex_file->DisableAutoClose();
       if (input_vdex_file_ != nullptr && output_vdex_fd_ == input_vdex_fd_) {
         update_input_vdex_ = true;
       } else {
@@ -1472,10 +1439,7 @@ class Dex2Oat FINAL {
         PLOG(ERROR) << "Failed to create swap file: " << swap_file_name_;
         return false;
       }
-      swap_fd_ = swap_file->Fd();
-      swap_file->MarkUnchecked();     // We don't we to track this, it will be unlinked immediately.
-      swap_file->DisableAutoClose();  // We'll handle it ourselves, the File object will be
-                                      // released immediately.
+      swap_fd_ = swap_file->Release();
       unlink(swap_file_name_.c_str());
     }
 
@@ -1566,9 +1530,6 @@ class Dex2Oat FINAL {
         std::vector<gc::space::ImageSpace*> image_spaces =
             Runtime::Current()->GetHeap()->GetBootImageSpaces();
         image_file_location_oat_checksum_ = image_spaces[0]->GetImageHeader().GetOatChecksum();
-        image_file_location_oat_data_begin_ =
-            reinterpret_cast<uintptr_t>(image_spaces[0]->GetImageHeader().GetOatDataBegin());
-        image_patch_delta_ = image_spaces[0]->GetImageHeader().GetPatchDelta();
         // Store the boot image filename(s).
         std::vector<std::string> image_filenames;
         for (const gc::space::ImageSpace* image_space : image_spaces) {
@@ -1580,8 +1541,6 @@ class Dex2Oat FINAL {
         }
       } else {
         image_file_location_oat_checksum_ = 0u;
-        image_file_location_oat_data_begin_ = 0u;
-        image_patch_delta_ = 0;
       }
 
       // Open dex files for class path.
@@ -2151,10 +2110,7 @@ class Dex2Oat FINAL {
           elf_writer->EndDataBimgRelRo(data_bimg_rel_ro);
         }
 
-        if (!oat_writer->WriteHeader(elf_writer->GetStream(),
-                                     image_file_location_oat_checksum_,
-                                     image_file_location_oat_data_begin_,
-                                     image_patch_delta_)) {
+        if (!oat_writer->WriteHeader(elf_writer->GetStream(), image_file_location_oat_checksum_)) {
           LOG(ERROR) << "Failed to write oat header to the ELF file " << oat_file->GetPath();
           return false;
         }
@@ -2805,8 +2761,6 @@ class Dex2Oat FINAL {
   Compiler::Kind compiler_kind_;
 
   uint32_t image_file_location_oat_checksum_;
-  uintptr_t image_file_location_oat_data_begin_;
-  int32_t image_patch_delta_;
   std::unique_ptr<SafeMap<std::string, std::string> > key_value_store_;
 
   std::unique_ptr<VerificationResults> verification_results_;
