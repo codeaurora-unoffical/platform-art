@@ -19,35 +19,43 @@
 
 #include "base/bit_utils.h"
 #include "base/casts.h"
-#include "base/enums.h"
-#include "base/iteration_range.h"
 #include "base/stride_iterator.h"
-#include "base/utils.h"
 #include "class_flags.h"
 #include "class_status.h"
-#include "dex/dex_file.h"
 #include "dex/dex_file_types.h"
 #include "dex/modifiers.h"
 #include "dex/primitive.h"
 #include "gc/allocator_type.h"
-#include "imtable.h"
 #include "object.h"
 #include "object_array.h"
 #include "read_barrier_option.h"
-#include "thread-current-inl.h"
 
 namespace art {
 
+namespace dex {
+struct ClassDef;
+class TypeList;
+}  // namespace dex
+
+namespace hiddenapi {
+class AccessContext;
+}  // namespace hiddenapi
+
+template<typename T> class ArraySlice;
 class ArtField;
 class ArtMethod;
 struct ClassOffsets;
+class DexFile;
 template<class T> class Handle;
+class ImTable;
 enum InvokeType : uint32_t;
+template <typename Iter> class IterationRange;
 template<typename T> class LengthPrefixedArray;
-template<typename T> class ArraySlice;
+enum class PointerSize : size_t;
 class Signature;
 class StringPiece;
 template<size_t kNumReferences> class PACKED(4) StackHandleScope;
+class Thread;
 
 namespace mirror {
 
@@ -219,17 +227,9 @@ class MANAGED Class final : public Object {
     SetAccessFlags(flags | kAccSkipHiddenapiChecks);
   }
 
-  ALWAYS_INLINE void SetRecursivelyInitialized() REQUIRES_SHARED(Locks::mutator_lock_) {
-    DCHECK_EQ(GetLockOwnerThreadId(), Thread::Current()->GetThreadId());
-    uint32_t flags = GetField32(OFFSET_OF_OBJECT_MEMBER(Class, access_flags_));
-    SetAccessFlags(flags | kAccRecursivelyInitialized);
-  }
+  ALWAYS_INLINE void SetRecursivelyInitialized() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  ALWAYS_INLINE void SetHasDefaultMethods() REQUIRES_SHARED(Locks::mutator_lock_) {
-    DCHECK_EQ(GetLockOwnerThreadId(), Thread::Current()->GetThreadId());
-    uint32_t flags = GetField32(OFFSET_OF_OBJECT_MEMBER(Class, access_flags_));
-    SetAccessFlags(flags | kAccHasDefaultMethod);
-  }
+  ALWAYS_INLINE void SetHasDefaultMethods() REQUIRES_SHARED(Locks::mutator_lock_);
 
   ALWAYS_INLINE void SetFinalizable() REQUIRES_SHARED(Locks::mutator_lock_) {
     uint32_t flags = GetField32(OFFSET_OF_OBJECT_MEMBER(Class, access_flags_));
@@ -706,10 +706,12 @@ class MANAGED Class final : public Object {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   template <PointerSize kPointerSize, bool kTransactionActive>
-  static ObjPtr<Method> GetDeclaredMethodInternal(Thread* self,
-                                                  ObjPtr<Class> klass,
-                                                  ObjPtr<String> name,
-                                                  ObjPtr<ObjectArray<Class>> args)
+  static ObjPtr<Method> GetDeclaredMethodInternal(
+      Thread* self,
+      ObjPtr<Class> klass,
+      ObjPtr<String> name,
+      ObjPtr<ObjectArray<Class>> args,
+      const std::function<hiddenapi::AccessContext()>& fn_get_access_context)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   template <PointerSize kPointerSize, bool kTransactionActive>
@@ -1134,7 +1136,7 @@ class MANAGED Class final : public Object {
 
   bool DescriptorEquals(const char* match) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  const DexFile::ClassDef* GetClassDef() REQUIRES_SHARED(Locks::mutator_lock_);
+  const dex::ClassDef* GetClassDef() REQUIRES_SHARED(Locks::mutator_lock_);
 
   ALWAYS_INLINE uint32_t NumDirectInterfaces() REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -1157,7 +1159,7 @@ class MANAGED Class final : public Object {
 
   const DexFile& GetDexFile() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  const DexFile::TypeList* GetInterfaceTypeList() REQUIRES_SHARED(Locks::mutator_lock_);
+  const dex::TypeList* GetInterfaceTypeList() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Asserts we are initialized or initializing in the given thread.
   void AssertInitializedOrInitializingInThread(Thread* self)
@@ -1306,6 +1308,8 @@ class MANAGED Class final : public Object {
 
   template<VerifyObjectFlags kVerifyFlags>
   void GetAccessFlagsDCheck() REQUIRES_SHARED(Locks::mutator_lock_);
+
+  void SetAccessFlagsDCheck(uint32_t new_access_flags) REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Check that the pointer size matches the one in the class linker.
   ALWAYS_INLINE static void CheckPointerSize(PointerSize pointer_size);

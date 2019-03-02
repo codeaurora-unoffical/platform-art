@@ -683,7 +683,7 @@ void ThreadList::SuspendAll(const char* cause, bool long_suspend) {
       AssertThreadsAreSuspended(self, self);
     }
   }
-  ATRACE_BEGIN((std::string("Mutator threads suspended for ") + cause).c_str());
+  ATraceBegin((std::string("Mutator threads suspended for ") + cause).c_str());
 
   if (self != nullptr) {
     VLOG(threads) << *self << " SuspendAll complete";
@@ -766,15 +766,29 @@ void ThreadList::SuspendAllInternal(Thread* self,
 #if ART_USE_FUTEXES
       if (futex(pending_threads.Address(), FUTEX_WAIT_PRIVATE, cur_val, &wait_timeout, nullptr, 0)
           != 0) {
-        // EAGAIN and EINTR both indicate a spurious failure, try again from the beginning.
-        if ((errno != EAGAIN) && (errno != EINTR)) {
-          if (errno == ETIMEDOUT) {
-            LOG(kIsDebugBuild ? ::android::base::FATAL : ::android::base::ERROR)
-                << "Timed out waiting for threads to suspend, waited for "
-                << PrettyDuration(NanoTime() - start_time);
-          } else {
-            PLOG(FATAL) << "futex wait failed for SuspendAllInternal()";
+        if ((errno == EAGAIN) || (errno == EINTR)) {
+          // EAGAIN and EINTR both indicate a spurious failure, try again from the beginning.
+          continue;
+        }
+        if (errno == ETIMEDOUT) {
+          const uint64_t wait_time = NanoTime() - start_time;
+          MutexLock mu(self, *Locks::thread_list_lock_);
+          MutexLock mu2(self, *Locks::thread_suspend_count_lock_);
+          std::ostringstream oss;
+          for (const auto& thread : list_) {
+            if (thread == ignore1 || thread == ignore2) {
+              continue;
+            }
+            if (!thread->IsSuspended()) {
+              oss << std::endl << "Thread not suspended: " << *thread;
+            }
           }
+          LOG(kIsDebugBuild ? ::android::base::FATAL : ::android::base::ERROR)
+              << "Timed out waiting for threads to suspend, waited for "
+              << PrettyDuration(wait_time)
+              << oss.str();
+        } else {
+          PLOG(FATAL) << "futex wait failed for SuspendAllInternal()";
         }
       }  // else re-check pending_threads in the next iteration (this may be a spurious wake-up).
 #else
@@ -797,7 +811,7 @@ void ThreadList::ResumeAll() {
     VLOG(threads) << "Thread[null] ResumeAll starting";
   }
 
-  ATRACE_END();
+  ATraceEnd();
 
   ScopedTrace trace("Resuming mutator threads");
 
@@ -841,8 +855,8 @@ void ThreadList::ResumeAll() {
 }
 
 bool ThreadList::Resume(Thread* thread, SuspendReason reason) {
-  // This assumes there was an ATRACE_BEGIN when we suspended the thread.
-  ATRACE_END();
+  // This assumes there was an ATraceBegin when we suspended the thread.
+  ATraceEnd();
 
   Thread* self = Thread::Current();
   DCHECK_NE(thread, self);
@@ -973,10 +987,10 @@ Thread* ThreadList::SuspendThreadByPeer(jobject peer,
         // done.
         if (thread->IsSuspended()) {
           VLOG(threads) << "SuspendThreadByPeer thread suspended: " << *thread;
-          if (ATRACE_ENABLED()) {
+          if (ATraceEnabled()) {
             std::string name;
             thread->GetThreadName(name);
-            ATRACE_BEGIN(StringPrintf("SuspendThreadByPeer suspended %s for peer=%p", name.c_str(),
+            ATraceBegin(StringPrintf("SuspendThreadByPeer suspended %s for peer=%p", name.c_str(),
                                       peer).c_str());
           }
           return thread;
@@ -1083,10 +1097,10 @@ Thread* ThreadList::SuspendThreadByThreadId(uint32_t thread_id,
         // count, or else we've waited and it has self suspended) or is the current thread, we're
         // done.
         if (thread->IsSuspended()) {
-          if (ATRACE_ENABLED()) {
+          if (ATraceEnabled()) {
             std::string name;
             thread->GetThreadName(name);
-            ATRACE_BEGIN(StringPrintf("SuspendThreadByThreadId suspended %s id=%d",
+            ATraceBegin(StringPrintf("SuspendThreadByThreadId suspended %s id=%d",
                                       name.c_str(), thread_id).c_str());
           }
           VLOG(threads) << "SuspendThreadByThreadId thread suspended: " << *thread;
@@ -1462,24 +1476,26 @@ void ThreadList::Unregister(Thread* self) {
     // Remove and delete the Thread* while holding the thread_list_lock_ and
     // thread_suspend_count_lock_ so that the unregistering thread cannot be suspended.
     // Note: deliberately not using MutexLock that could hold a stale self pointer.
-    MutexLock mu(self, *Locks::thread_list_lock_);
-    if (!Contains(self)) {
-      std::string thread_name;
-      self->GetThreadName(thread_name);
-      std::ostringstream os;
-      DumpNativeStack(os, GetTid(), nullptr, "  native: ", nullptr);
-      LOG(ERROR) << "Request to unregister unattached thread " << thread_name << "\n" << os.str();
-      break;
-    } else {
-      MutexLock mu2(self, *Locks::thread_suspend_count_lock_);
-      if (!self->IsSuspended()) {
-        list_.remove(self);
+    {
+      MutexLock mu(self, *Locks::thread_list_lock_);
+      if (!Contains(self)) {
+        std::string thread_name;
+        self->GetThreadName(thread_name);
+        std::ostringstream os;
+        DumpNativeStack(os, GetTid(), nullptr, "  native: ", nullptr);
+        LOG(ERROR) << "Request to unregister unattached thread " << thread_name << "\n" << os.str();
         break;
+      } else {
+        MutexLock mu2(self, *Locks::thread_suspend_count_lock_);
+        if (!self->IsSuspended()) {
+          list_.remove(self);
+          break;
+        }
       }
-      // In the case where we are not suspended yet, sleep to leave other threads time to execute.
-      // This is important if there are realtime threads. b/111277984
-      usleep(1);
     }
+    // In the case where we are not suspended yet, sleep to leave other threads time to execute.
+    // This is important if there are realtime threads. b/111277984
+    usleep(1);
     // We failed to remove the thread due to a suspend request, loop and try again.
   }
   delete self;
@@ -1561,7 +1577,7 @@ uint32_t ThreadList::AllocThreadId(Thread* self) {
     }
   }
   LOG(FATAL) << "Out of internal thread ids";
-  return 0;
+  UNREACHABLE();
 }
 
 void ThreadList::ReleaseThreadId(Thread* self, uint32_t id) {

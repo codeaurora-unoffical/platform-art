@@ -64,16 +64,19 @@ art_cc_defaults {
 
     target: {
         android: {
-            // For atrace.
-            shared_libs: ["libcutils"],
+            static_libs: [
+                "libz",
+            ],
+        },
+        host: {
+            shared_libs: [
+                "libz",
+            ],
         },
     },
     generated_sources: ["art_dex2oat_operator_srcs"],
     shared_libs: [
         "libbase",
-    ],
-    include_dirs: [
-        "external/zlib",
     ],
     export_include_dirs: ["."],
 
@@ -88,13 +91,9 @@ art_cc_defaults {
 
 cc_defaults {
     name: "libart-dex2oat_static_base_defaults",
-    target: {
-        android: {
-            static_libs: ["libcutils"],
-        },
-    },
     static_libs: [
         "libbase",
+        "libz",
     ],
 }
 
@@ -108,7 +107,7 @@ gensrcs {
     output_extension: "operator_out.cc",
 }
 
-art_cc_static_library {
+art_cc_library_static {
     name: "libart-dex2oat",
     defaults: ["libart-dex2oat-defaults"],
     shared_libs: [
@@ -133,7 +132,7 @@ cc_defaults {
     ],
 }
 
-art_cc_static_library {
+art_cc_library_static {
     name: "libartd-dex2oat",
     defaults: [
         "art_debug_defaults",
@@ -261,6 +260,14 @@ art_cc_binary {
             lto: {
                  thin: true,
             },
+            static_libs: [
+                "libz",
+            ],
+        },
+        host: {
+            shared_libs: [
+                "libz",
+            ],
         },
     },
 }
@@ -284,6 +291,30 @@ art_cc_binary {
     static_libs: [
         "libartd-dex2oat",
     ],
+    target: {
+        android: {
+            static_libs: [
+                "libz",
+            ],
+        },
+        host: {
+            shared_libs: [
+                "libz",
+            ],
+            compile_multilib: "both",
+        },
+    },
+
+    multilib: {
+        lib32: {
+            suffix: "32",
+        },
+        lib64: {
+            suffix: "64",
+        },
+    },
+
+    symlink_preferred_arch: true,
 }
 
 cc_defaults {
@@ -309,6 +340,7 @@ cc_defaults {
     static_libs: [
         "libbase",
         "libsigchain_dummy",
+        "libz",
     ],
 }
 

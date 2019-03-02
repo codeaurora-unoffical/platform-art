@@ -17,8 +17,6 @@
 #ifndef ART_RUNTIME_THREAD_H_
 #define ART_RUNTIME_THREAD_H_
 
-#include <setjmp.h>
-
 #include <atomic>
 #include <bitset>
 #include <deque>
@@ -27,23 +25,21 @@
 #include <memory>
 #include <string>
 
-#include "arch/context.h"
-#include "arch/instruction_set.h"
 #include "base/atomic.h"
 #include "base/enums.h"
-#include "base/globals.h"
+#include "base/locks.h"
 #include "base/macros.h"
-#include "base/mutex.h"
 #include "base/safe_map.h"
+#include "base/value_object.h"
 #include "entrypoints/jni/jni_entrypoints.h"
 #include "entrypoints/quick/quick_entrypoints.h"
 #include "handle_scope.h"
-#include "instrumentation.h"
 #include "interpreter/interpreter_cache.h"
 #include "jvalue.h"
 #include "managed_stack.h"
 #include "offsets.h"
 #include "read_barrier_config.h"
+#include "runtime_globals.h"
 #include "runtime_stats.h"
 #include "suspend_reason.h"
 #include "thread_state.h"
@@ -60,6 +56,10 @@ namespace collector {
 class SemiSpace;
 }  // namespace collector
 }  // namespace gc
+
+namespace instrumentation {
+struct InstrumentationStackFrame;
+}  // namespace instrumentation
 
 namespace mirror {
 class Array;
@@ -470,16 +470,7 @@ class Thread {
   Context* GetLongJumpContext();
   void ReleaseLongJumpContext(Context* context) {
     if (tlsPtr_.long_jump_context != nullptr) {
-      // Each QuickExceptionHandler gets a long jump context and uses
-      // it for doing the long jump, after finding catch blocks/doing deoptimization.
-      // Both finding catch blocks and deoptimization can trigger another
-      // exception such as a result of class loading. So there can be nested
-      // cases of exception handling and multiple contexts being used.
-      // ReleaseLongJumpContext tries to save the context in tlsPtr_.long_jump_context
-      // for reuse so there is no need to always allocate a new one each time when
-      // getting a context. Since we only keep one context for reuse, delete the
-      // existing one since the passed in context is yet to be used for longjump.
-      delete tlsPtr_.long_jump_context;
+      ReleaseLongJumpContextInternal();
     }
     tlsPtr_.long_jump_context = context;
   }
@@ -565,11 +556,11 @@ class Thread {
   bool Interrupted();
   // Implements java.lang.Thread.isInterrupted.
   bool IsInterrupted();
-  void Interrupt(Thread* self) REQUIRES(!*wait_mutex_);
+  void Interrupt(Thread* self) REQUIRES(!wait_mutex_);
   void SetInterrupted(bool i) {
     tls32_.interrupted.store(i, std::memory_order_seq_cst);
   }
-  void Notify() REQUIRES(!*wait_mutex_);
+  void Notify() REQUIRES(!wait_mutex_);
 
   ALWAYS_INLINE void PoisonObjectPointers() {
     ++poison_object_cookie_;
@@ -818,19 +809,7 @@ class Thread {
     return tlsPtr_.stack_size - (tlsPtr_.stack_end - tlsPtr_.stack_begin);
   }
 
-  uint8_t* GetStackEndForInterpreter(bool implicit_overflow_check) const {
-    uint8_t* end = tlsPtr_.stack_end + (implicit_overflow_check
-                                            ? GetStackOverflowReservedBytes(kRuntimeISA)
-                                            : 0);
-    if (kIsDebugBuild) {
-      // In a debuggable build, but especially under ASAN, the access-checks interpreter has a
-      // potentially humongous stack size. We don't want to take too much of the stack regularly,
-      // so do not increase the regular reserved size (for compiled code etc) and only report the
-      // virtually smaller stack to the interpreter here.
-      end += GetStackOverflowReservedBytes(kRuntimeISA);
-    }
-    return end;
-  }
+  ALWAYS_INLINE uint8_t* GetStackEndForInterpreter(bool implicit_overflow_check) const;
 
   uint8_t* GetStackEnd() const {
     return tlsPtr_.stack_end;
@@ -840,11 +819,7 @@ class Thread {
   void SetStackEndForStackOverflow() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Set the stack end to that to be used during regular execution
-  void ResetDefaultStackEnd() {
-    // Our stacks grow down, so we want stack_end_ to be near there, but reserving enough room
-    // to throw a StackOverflowError.
-    tlsPtr_.stack_end = tlsPtr_.stack_begin + GetStackOverflowReservedBytes(kRuntimeISA);
-  }
+  ALWAYS_INLINE void ResetDefaultStackEnd();
 
   bool IsHandlingStackOverflow() const {
     return tlsPtr_.stack_end == tlsPtr_.stack_begin;
@@ -1423,6 +1398,8 @@ class Thread {
   void VisitRoots(RootVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_);
 
   static bool IsAotCompiler();
+
+  void ReleaseLongJumpContextInternal();
 
   // 32 bits of atomically changed state and flags. Keeping as 32 bits allows and atomic CAS to
   // change from being Suspended to Runnable without a suspend request occurring.

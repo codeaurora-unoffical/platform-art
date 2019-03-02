@@ -469,6 +469,7 @@ void DexWriter::WriteHiddenapiClassData(Stream* stream) {
   DCHECK_EQ(header_->HiddenapiClassDatas().Size(), header_->ClassDefs().Size());
 
   stream->AlignTo(SectionAlignment(DexFile::kDexTypeHiddenapiClassData));
+  ProcessOffset(stream, &header_->HiddenapiClassDatas());
   const uint32_t start = stream->Tell();
 
   // Compute offsets for each class def and write the header.
@@ -535,10 +536,10 @@ void DexWriter::WriteCodeItemPostInstructionData(Stream* stream,
                                                  dex_ir::CodeItem* code_item,
                                                  bool reserve_only) {
   if (code_item->TriesSize() != 0) {
-    stream->AlignTo(DexFile::TryItem::kAlignment);
+    stream->AlignTo(dex::TryItem::kAlignment);
     // Write try items.
     for (std::unique_ptr<const dex_ir::TryItem>& try_item : *code_item->Tries()) {
-      DexFile::TryItem disk_try_item;
+      dex::TryItem disk_try_item;
       if (!reserve_only) {
         disk_try_item.start_addr_ = try_item->StartAddr();
         disk_try_item.insn_count_ = try_item->InsnCount();
@@ -712,7 +713,7 @@ void DexWriter::WriteMapItems(Stream* stream, MapItemQueue* queue) {
   stream->Write(&map_list_size, sizeof(map_list_size));
   while (!queue->empty()) {
     const MapItem& item = queue->top();
-    DexFile::MapItem map_item;
+    dex::MapItem map_item;
     map_item.type_ = item.type_;
     map_item.size_ = item.size_;
     map_item.offset_ = item.offset_;
@@ -981,6 +982,15 @@ void MapItemQueue::AddIfNotEmpty(const MapItem& item) {
 }
 
 void DexWriter::ProcessOffset(Stream* stream, dex_ir::Item* item) {
+  if (compute_offsets_) {
+    item->SetOffset(stream->Tell());
+  } else {
+    // Not computing offsets, just use the one in the item.
+    stream->Seek(item->GetOffset());
+  }
+}
+
+void DexWriter::ProcessOffset(Stream* stream, dex_ir::CollectionBase* item) {
   if (compute_offsets_) {
     item->SetOffset(stream->Tell());
   } else {

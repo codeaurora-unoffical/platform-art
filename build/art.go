@@ -16,8 +16,10 @@ package art
 
 import (
 	"android/soong/android"
+	"android/soong/apex"
 	"android/soong/cc"
 	"fmt"
+	"log"
 	"sync"
 
 	"github.com/google/blueprint/proptools"
@@ -280,7 +282,7 @@ var artTestMutex sync.Mutex
 
 func init() {
 	android.RegisterModuleType("art_cc_library", artLibrary)
-	android.RegisterModuleType("art_cc_static_library", artStaticLibrary)
+	android.RegisterModuleType("art_cc_library_static", artStaticLibrary)
 	android.RegisterModuleType("art_cc_binary", artBinary)
 	android.RegisterModuleType("art_cc_test", artTest)
 	android.RegisterModuleType("art_cc_test_library", artTestLibrary)
@@ -289,6 +291,36 @@ func init() {
 	android.RegisterModuleType("libart_static_cc_defaults", libartStaticDefaultsFactory)
 	android.RegisterModuleType("art_global_defaults", artGlobalDefaultsFactory)
 	android.RegisterModuleType("art_debug_defaults", artDebugDefaultsFactory)
+
+	// TODO: This makes the module disable itself for host if HOST_PREFER_32_BIT is
+	// set. We need this because the multilib types of binaries listed in the apex
+	// rule must match the declared type. This is normally not difficult but HOST_PREFER_32_BIT
+	// changes this to 'prefer32' on all host binaries. Since HOST_PREFER_32_BIT is
+	// only used for testing we can just disable the module.
+	// See b/120617876 for more information.
+	android.RegisterModuleType("art_apex", artApexBundleFactory)
+}
+
+func artApexBundleFactory() android.Module {
+	module := apex.ApexBundleFactory()
+	android.AddLoadHook(module, func(ctx android.LoadHookContext) {
+		if envTrue(ctx, "HOST_PREFER_32_BIT") {
+			type props struct {
+				Target struct {
+					Host struct {
+						Enabled *bool
+					}
+				}
+			}
+
+			p := &props{}
+			p.Target.Host.Enabled = proptools.BoolPtr(false)
+			ctx.AppendProperties(p)
+			log.Print("Disabling host build of " + ctx.ModuleName() + " for HOST_PREFER_32_BIT=true")
+		}
+	})
+
+	return module
 }
 
 func artGlobalDefaultsFactory() android.Module {
@@ -316,26 +348,7 @@ func artDefaultsFactory() android.Module {
 func libartDefaultsFactory() android.Module {
 	c := &codegenProperties{}
 	module := cc.DefaultsFactory(c)
-	android.AddLoadHook(module, func(ctx android.LoadHookContext) {
-		codegen(ctx, c, true)
-
-		type props struct {
-			Target struct {
-				Android struct {
-					Shared_libs []string
-				}
-			}
-		}
-
-		p := &props{}
-		// TODO: express this in .bp instead b/79671158
-		if !envTrue(ctx, "ART_TARGET_LINUX") {
-			p.Target.Android.Shared_libs = []string{
-				"libmetricslogger",
-			}
-		}
-		ctx.AppendProperties(p)
-	})
+	android.AddLoadHook(module, func(ctx android.LoadHookContext) { codegen(ctx, c, true) })
 
 	return module
 }
@@ -343,27 +356,7 @@ func libartDefaultsFactory() android.Module {
 func libartStaticDefaultsFactory() android.Module {
 	c := &codegenProperties{}
 	module := cc.DefaultsFactory(c)
-	android.AddLoadHook(module, func(ctx android.LoadHookContext) {
-		codegen(ctx, c, true)
-
-		type props struct {
-			Target struct {
-				Android struct {
-					Static_libs []string
-				}
-			}
-		}
-
-		p := &props{}
-		// TODO: express this in .bp instead b/79671158
-		if !envTrue(ctx, "ART_TARGET_LINUX") {
-			p.Target.Android.Static_libs = []string{
-				"libmetricslogger",
-				"libstatssocket",
-			}
-		}
-		ctx.AppendProperties(p)
-	})
+	android.AddLoadHook(module, func(ctx android.LoadHookContext) {	codegen(ctx, c, true) })
 
 	return module
 }

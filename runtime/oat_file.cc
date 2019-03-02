@@ -33,6 +33,7 @@
 #include "android/dlext.h"
 #endif
 
+#include <android-base/logging.h>
 #include "android-base/stringprintf.h"
 
 #include "art_method.h"
@@ -47,7 +48,9 @@
 #include "base/unix_file/fd_file.h"
 #include "base/utils.h"
 #include "dex/art_dex_file_loader.h"
+#include "dex/dex_file.h"
 #include "dex/dex_file_loader.h"
+#include "dex/dex_file_structs.h"
 #include "dex/dex_file_types.h"
 #include "dex/standard_dex_file.h"
 #include "dex/type_lookup_table.h"
@@ -467,6 +470,7 @@ static void DCheckIndexToBssMapping(OatFile* oat_file,
       }
       prev_entry = &entry;
     }
+    CHECK(prev_entry != nullptr);
     CHECK_LT(prev_entry->GetIndex(index_bits), number_of_indexes);
   }
 }
@@ -579,9 +583,9 @@ bool OatFileBase::Setup(int zip_fd, const char* abs_dex_location, std::string* e
     const char* dex_file_location_data = reinterpret_cast<const char*>(oat);
     oat += dex_file_location_size;
 
-    std::string dex_file_location = ResolveRelativeEncodedDexLocation(
-        abs_dex_location,
-        std::string(dex_file_location_data, dex_file_location_size));
+    std::string dex_file_location(dex_file_location_data, dex_file_location_size);
+    std::string dex_file_name =
+        ResolveRelativeEncodedDexLocation(abs_dex_location, dex_file_location);
 
     uint32_t dex_file_checksum;
     if (UNLIKELY(!ReadOatDexFileData(*this, &oat, &dex_file_checksum))) {
@@ -636,7 +640,7 @@ bool OatFileBase::Setup(int zip_fd, const char* abs_dex_location, std::string* e
                                            error_msg,
                                            uncompressed_dex_files_.get());
         } else {
-          loaded = dex_file_loader.Open(dex_file_location.c_str(),
+          loaded = dex_file_loader.Open(dex_file_name.c_str(),
                                         dex_file_location,
                                         /*verify=*/ false,
                                         /*verify_checksum=*/ false,
@@ -817,7 +821,7 @@ bool OatFileBase::Setup(int zip_fd, const char* abs_dex_location, std::string* e
         this, header->string_ids_size_, sizeof(GcRoot<mirror::String>), string_bss_mapping);
 
     std::string canonical_location =
-        DexFileLoader::GetDexCanonicalLocation(dex_file_location.c_str());
+        DexFileLoader::GetDexCanonicalLocation(dex_file_name.c_str());
 
     // Create the OatDexFile and add it to the owning container.
     OatDexFile* oat_dex_file = new OatDexFile(this,
@@ -1406,20 +1410,23 @@ bool ElfOatFile::ElfFileOpen(File* file,
 
 std::string OatFile::ResolveRelativeEncodedDexLocation(
       const char* abs_dex_location, const std::string& rel_dex_location) {
-  // For host, we still do resolution as the rel_dex_location might be absolute
-  // for a target dex (for example /system/foo/foo.apk).
-  if (abs_dex_location != nullptr && (rel_dex_location[0] != '/' || !kIsTargetBuild)) {
-    // Strip :classes<N>.dex used for secondary multidex files.
+  if (abs_dex_location != nullptr) {
     std::string base = DexFileLoader::GetBaseLocation(rel_dex_location);
+    // Strip :classes<N>.dex used for secondary multidex files.
     std::string multidex_suffix = DexFileLoader::GetMultiDexSuffix(rel_dex_location);
-
-    // Check if the base is a suffix of the provided abs_dex_location.
-    std::string target_suffix = ((rel_dex_location[0] != '/') ? "/" : "") + base;
-    std::string abs_location(abs_dex_location);
-    if (abs_location.size() > target_suffix.size()) {
-      size_t pos = abs_location.size() - target_suffix.size();
-      if (abs_location.compare(pos, std::string::npos, target_suffix) == 0) {
-        return abs_location + multidex_suffix;
+    if (!kIsTargetBuild) {
+      // For host, we still do resolution as the rel_dex_location might be absolute
+      // for a target dex (for example /system/foo/foo.apk).
+      return std::string(abs_dex_location) + multidex_suffix;
+    } else if (rel_dex_location[0] != '/') {
+      // Check if the base is a suffix of the provided abs_dex_location.
+      std::string target_suffix = ((rel_dex_location[0] != '/') ? "/" : "") + base;
+      std::string abs_location(abs_dex_location);
+      if (abs_location.size() > target_suffix.size()) {
+        size_t pos = abs_location.size() - target_suffix.size();
+        if (abs_location.compare(pos, std::string::npos, target_suffix) == 0) {
+          return abs_location + multidex_suffix;
+        }
       }
     }
   }
@@ -1755,11 +1762,15 @@ OatDexFile::OatDexFile(const OatFile* oat_file,
   }
 }
 
-OatDexFile::OatDexFile(TypeLookupTable&& lookup_table) : lookup_table_(std::move(lookup_table)) {}
+OatDexFile::OatDexFile(TypeLookupTable&& lookup_table) : lookup_table_(std::move(lookup_table)) {
+  // Stripped-down OatDexFile only allowed in the compiler.
+  CHECK(Runtime::Current() == nullptr || Runtime::Current()->IsAotCompiler());
+}
 
 OatDexFile::~OatDexFile() {}
 
 size_t OatDexFile::FileSize() const {
+  DCHECK(dex_file_pointer_ != nullptr);
   return reinterpret_cast<const DexFile::Header*>(dex_file_pointer_)->file_size_;
 }
 
@@ -1779,6 +1790,7 @@ std::unique_ptr<const DexFile> OatDexFile::OpenDexFile(std::string* error_msg) c
 }
 
 uint32_t OatDexFile::GetOatClassOffset(uint16_t class_def_index) const {
+  DCHECK(oat_class_offsets_pointer_ != nullptr);
   return oat_class_offsets_pointer_[class_def_index];
 }
 
@@ -1824,13 +1836,23 @@ OatFile::OatClass OatDexFile::GetOatClass(uint16_t class_def_index) const {
                            reinterpret_cast<const OatMethodOffsets*>(methods_pointer));
 }
 
-const DexFile::ClassDef* OatDexFile::FindClassDef(const DexFile& dex_file,
-                                                  const char* descriptor,
-                                                  size_t hash) {
+ArrayRef<const uint8_t> OatDexFile::GetQuickenedInfoOf(const DexFile& dex_file,
+                                                       uint32_t dex_method_idx) const {
+  const OatFile* oat_file = GetOatFile();
+  if (oat_file == nullptr) {
+    return ArrayRef<const uint8_t>();
+  } else  {
+    return oat_file->GetVdexFile()->GetQuickenedInfoOf(dex_file, dex_method_idx);
+  }
+}
+
+const dex::ClassDef* OatDexFile::FindClassDef(const DexFile& dex_file,
+                                              const char* descriptor,
+                                              size_t hash) {
   const OatDexFile* oat_dex_file = dex_file.GetOatDexFile();
   DCHECK_EQ(ComputeModifiedUtf8Hash(descriptor), hash);
   bool used_lookup_table = false;
-  const DexFile::ClassDef* lookup_table_classdef = nullptr;
+  const dex::ClassDef* lookup_table_classdef = nullptr;
   if (LIKELY((oat_dex_file != nullptr) && oat_dex_file->GetTypeLookupTable().Valid())) {
     used_lookup_table = true;
     const uint32_t class_def_idx = oat_dex_file->GetTypeLookupTable().Lookup(descriptor, hash);
@@ -1847,10 +1869,10 @@ const DexFile::ClassDef* OatDexFile::FindClassDef(const DexFile& dex_file,
     DCHECK(!used_lookup_table);
     return nullptr;
   }
-  const DexFile::TypeId* type_id = dex_file.FindTypeId(descriptor);
+  const dex::TypeId* type_id = dex_file.FindTypeId(descriptor);
   if (type_id != nullptr) {
     dex::TypeIndex type_idx = dex_file.GetIndexForTypeId(*type_id);
-    const DexFile::ClassDef* found_class_def = dex_file.FindClassDef(type_idx);
+    const dex::ClassDef* found_class_def = dex_file.FindClassDef(type_idx);
     if (kIsDebugBuild && used_lookup_table) {
       DCHECK_EQ(found_class_def, lookup_table_classdef);
     }
@@ -1913,7 +1935,7 @@ OatFile::OatClass::OatClass(const OatFile* oat_file,
       }
       case kOatClassMax: {
         LOG(FATAL) << "Invalid OatClassType " << type_;
-        break;
+        UNREACHABLE();
       }
     }
 }

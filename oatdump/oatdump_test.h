@@ -90,6 +90,7 @@ class OatDumpTest : public CommonRuntimeTest {
 
   enum Mode {
     kModeOat,
+    kModeCoreOat,
     kModeOatWithBootImage,
     kModeArt,
     kModeSymbolize,
@@ -122,6 +123,10 @@ class OatDumpTest : public CommonRuntimeTest {
         "-Xmx512m",
         "--runtime-arg",
         "-Xnorelocate",
+        "--runtime-arg",
+        GetClassPathOption("-Xbootclasspath:", GetLibCoreDexFileNames()),
+        "--runtime-arg",
+        GetClassPathOption("-Xbootclasspath-locations:", GetLibCoreDexLocations()),
         "--boot-image=" + GetCoreArtLocation(),
         "--instruction-set=" + std::string(GetInstructionSetString(kRuntimeISA)),
         "--dex-file=" + GetTestDexFileName(GetAppBaseName().c_str()),
@@ -174,6 +179,11 @@ class OatDumpTest : public CommonRuntimeTest {
         expected_prefixes.push_back("InlineInfo");
       }
       if (mode == kModeArt) {
+        exec_argv.push_back("--runtime-arg");
+        exec_argv.push_back(GetClassPathOption("-Xbootclasspath:", GetLibCoreDexFileNames()));
+        exec_argv.push_back("--runtime-arg");
+        exec_argv.push_back(
+            GetClassPathOption("-Xbootclasspath-locations:", GetLibCoreDexLocations()));
         exec_argv.push_back("--image=" + core_art_location_);
         exec_argv.push_back("--instruction-set=" + std::string(
             GetInstructionSetString(kRuntimeISA)));
@@ -181,13 +191,20 @@ class OatDumpTest : public CommonRuntimeTest {
         expected_prefixes.push_back("IMAGE BEGIN:");
         expected_prefixes.push_back("kDexCaches:");
       } else if (mode == kModeOatWithBootImage) {
+        exec_argv.push_back("--runtime-arg");
+        exec_argv.push_back(GetClassPathOption("-Xbootclasspath:", GetLibCoreDexFileNames()));
+        exec_argv.push_back("--runtime-arg");
+        exec_argv.push_back(
+            GetClassPathOption("-Xbootclasspath-locations:", GetLibCoreDexLocations()));
         exec_argv.push_back("--boot-image=" + GetCoreArtLocation());
         exec_argv.push_back("--instruction-set=" + std::string(
             GetInstructionSetString(kRuntimeISA)));
         exec_argv.push_back("--oat-file=" + GetAppOdexName());
+      } else if (mode == kModeCoreOat) {
+        exec_argv.push_back("--oat-file=" + core_oat_location_);
       } else {
         CHECK_EQ(static_cast<size_t>(mode), static_cast<size_t>(kModeOat));
-        exec_argv.push_back("--oat-file=" + core_oat_location_);
+        exec_argv.push_back("--oat-file=" + GetAppOdexName());
       }
     }
     exec_argv.insert(exec_argv.end(), args.begin(), args.end());

@@ -33,6 +33,7 @@
 #include "nth_caller_visitor.h"
 #include "scoped_thread_state_change-inl.h"
 #include "stack_reference.h"
+#include "thread-inl.h"
 #include "well_known_classes.h"
 
 namespace art {
@@ -226,7 +227,7 @@ class ArgArray {
                                     ArtMethod* m,
                                     Thread* self)
       REQUIRES_SHARED(Locks::mutator_lock_) {
-    const DexFile::TypeList* classes = m->GetParameterTypeList();
+    const dex::TypeList* classes = m->GetParameterTypeList();
     // Set receiver if non-null (method is not static)
     if (receiver != nullptr) {
       Append(receiver);
@@ -367,7 +368,7 @@ class ArgArray {
 
 void CheckMethodArguments(JavaVMExt* vm, ArtMethod* m, uint32_t* args)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  const DexFile::TypeList* params = m->GetParameterTypeList();
+  const dex::TypeList* params = m->GetParameterTypeList();
   if (params == nullptr) {
     return;  // No arguments so nothing to check.
   }
@@ -461,7 +462,7 @@ ALWAYS_INLINE
 bool CheckArgsForInvokeMethod(ArtMethod* np_method,
                               ObjPtr<mirror::ObjectArray<mirror::Object>> objects)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  const DexFile::TypeList* classes = np_method->GetParameterTypeList();
+  const dex::TypeList* classes = np_method->GetParameterTypeList();
   uint32_t classes_size = (classes == nullptr) ? 0 : classes->Size();
   uint32_t arg_count = (objects == nullptr) ? 0 : objects->GetLength();
   if (UNLIKELY(arg_count != classes_size)) {

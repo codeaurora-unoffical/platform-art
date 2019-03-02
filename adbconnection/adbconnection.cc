@@ -28,7 +28,7 @@
 #include "jni/java_vm_ext.h"
 #include "jni/jni_env_ext.h"
 #include "mirror/throwable.h"
-#include "nativehelper/ScopedLocalRef.h"
+#include "nativehelper/scoped_local_ref.h"
 #include "runtime-inl.h"
 #include "runtime_callbacks.h"
 #include "scoped_thread_state_change-inl.h"
@@ -476,7 +476,6 @@ android::base::unique_fd AdbConnectionState::ReadFdFromAdb() {
   int rc = TEMP_FAILURE_RETRY(recvmsg(control_sock_, &msg, 0));
 
   if (rc <= 0) {
-    PLOG(WARNING) << "Receiving file descriptor from ADB failed (socket " << control_sock_ << ")";
     return android::base::unique_fd(-1);
   } else {
     VLOG(jdwp) << "Fds have been received from ADB!";
@@ -624,7 +623,6 @@ void AdbConnectionState::RunPollLoop(art::Thread* self) {
           android::base::unique_fd new_fd(ReadFdFromAdb());
           if (new_fd == -1) {
             // Something went wrong. We need to retry getting the control socket.
-            PLOG(ERROR) << "Something went wrong getting fds from adb. Retry!";
             control_sock_.reset();
             break;
           } else if (adb_connection_socket_ != -1) {

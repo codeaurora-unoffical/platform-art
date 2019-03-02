@@ -17,22 +17,22 @@
 #ifndef ART_RUNTIME_GC_COLLECTOR_CONCURRENT_COPYING_H_
 #define ART_RUNTIME_GC_COLLECTOR_CONCURRENT_COPYING_H_
 
-#include "barrier.h"
-#include "base/safe_map.h"
 #include "garbage_collector.h"
 #include "immune_spaces.h"
-#include "jni.h"
-#include "mirror/object_reference.h"
 #include "offsets.h"
 
-#include <unordered_map>
+#include <map>
+#include <memory>
 #include <vector>
 
 namespace art {
+class Barrier;
 class Closure;
 class RootInfo;
 
 namespace mirror {
+template<class MirrorType> class CompressedReference;
+template<class MirrorType> class HeapReference;
 class Object;
 }  // namespace mirror
 
@@ -65,10 +65,11 @@ class ConcurrentCopying : public GarbageCollector {
   // pages.
   static constexpr bool kGrayDirtyImmuneObjects = true;
 
-  explicit ConcurrentCopying(Heap* heap,
-                             bool young_gen,
-                             const std::string& name_prefix = "",
-                             bool measure_read_barrier_slow_path = false);
+  ConcurrentCopying(Heap* heap,
+                    bool young_gen,
+                    bool use_generational_cc,
+                    const std::string& name_prefix = "",
+                    bool measure_read_barrier_slow_path = false);
   ~ConcurrentCopying();
 
   void RunPhases() override
@@ -79,6 +80,8 @@ class ConcurrentCopying : public GarbageCollector {
   void InitializePhase() REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!mark_stack_lock_, !immune_gray_stack_lock_);
   void MarkingPhase() REQUIRES_SHARED(Locks::mutator_lock_)
+      REQUIRES(!mark_stack_lock_);
+  void CopyingPhase() REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!mark_stack_lock_, !skipped_blocks_lock_, !immune_gray_stack_lock_);
   void ReclaimPhase() REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!mark_stack_lock_);
   void FinishPhase() REQUIRES(!mark_stack_lock_,
@@ -88,7 +91,7 @@ class ConcurrentCopying : public GarbageCollector {
   void BindBitmaps() REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::heap_bitmap_lock_);
   GcType GetGcType() const override {
-    return (kEnableGenerationalConcurrentCopyingCollection && young_gen_)
+    return (use_generational_cc_ && young_gen_)
         ? kGcTypeSticky
         : kGcTypePartial;
   }
@@ -96,6 +99,9 @@ class ConcurrentCopying : public GarbageCollector {
     return kCollectorTypeCC;
   }
   void RevokeAllThreadLocalBuffers() override;
+  // Creates inter-region ref bitmaps for region-space and non-moving-space.
+  // Gets called in Heap construction after the two spaces are created.
+  void CreateInterRegionRefBitmaps();
   void SetRegionSpace(space::RegionSpace* region_space) {
     DCHECK(region_space != nullptr);
     region_space_ = region_space;
@@ -161,6 +167,13 @@ class ConcurrentCopying : public GarbageCollector {
   template <bool kNoUnEvac>
   void Scan(mirror::Object* to_ref) REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!mark_stack_lock_);
+  // Scan the reference fields of object 'obj' in the dirty cards during
+  // card-table scan. In addition to visiting the references, it also sets the
+  // read-barrier state to gray for Reference-type objects to ensure that
+  // GetReferent() called on these objects calls the read-barrier on the referent.
+  template <bool kNoUnEvac>
+  void ScanDirtyObject(mirror::Object* obj) REQUIRES_SHARED(Locks::mutator_lock_)
+      REQUIRES(!mark_stack_lock_);
   // Process a field.
   template <bool kNoUnEvac>
   void Process(mirror::Object* obj, MemberOffset offset)
@@ -198,7 +211,10 @@ class ConcurrentCopying : public GarbageCollector {
   void VerifyNoMissingCardMarks()
       REQUIRES(Locks::mutator_lock_)
       REQUIRES(!mark_stack_lock_);
-  size_t ProcessThreadLocalMarkStacks(bool disable_weak_ref_access, Closure* checkpoint_callback)
+  template <typename Processor>
+  size_t ProcessThreadLocalMarkStacks(bool disable_weak_ref_access,
+                                      Closure* checkpoint_callback,
+                                      const Processor& processor)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!mark_stack_lock_);
   void RevokeThreadLocalMarkStacks(bool disable_weak_ref_access, Closure* checkpoint_callback)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -217,6 +233,8 @@ class ConcurrentCopying : public GarbageCollector {
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!mark_stack_lock_, !skipped_blocks_lock_, !immune_gray_stack_lock_);
   bool IsMarkedInUnevacFromSpace(mirror::Object* from_ref)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  bool IsMarkedInNonMovingSpace(mirror::Object* from_ref)
       REQUIRES_SHARED(Locks::mutator_lock_);
   bool IsNullOrMarkedHeapReference(mirror::HeapReference<mirror::Object>* field,
                                    bool do_atomic_update) override
@@ -283,11 +301,6 @@ class ConcurrentCopying : public GarbageCollector {
   ALWAYS_INLINE mirror::Object* MarkImmuneSpace(Thread* const self,
                                                 mirror::Object* from_ref)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!immune_gray_stack_lock_);
-  void PushOntoFalseGrayStack(Thread* const self, mirror::Object* obj)
-      REQUIRES_SHARED(Locks::mutator_lock_)
-      REQUIRES(!mark_stack_lock_);
-  void ProcessFalseGrayStack() REQUIRES_SHARED(Locks::mutator_lock_)
-      REQUIRES(!mark_stack_lock_);
   void ScanImmuneObject(mirror::Object* obj)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!mark_stack_lock_);
   mirror::Object* MarkFromReadBarrierWithMeasurements(Thread* const self,
@@ -298,9 +311,31 @@ class ConcurrentCopying : public GarbageCollector {
   // Set the read barrier mark entrypoints to non-null.
   void ActivateReadBarrierEntrypoints();
 
+  void CaptureThreadRootsForMarking() REQUIRES_SHARED(Locks::mutator_lock_);
+  void AddLiveBytesAndScanRef(mirror::Object* ref) REQUIRES_SHARED(Locks::mutator_lock_);
+  bool TestMarkBitmapForRef(mirror::Object* ref) REQUIRES_SHARED(Locks::mutator_lock_);
+  template <bool kAtomic = false>
+  bool TestAndSetMarkBitForRef(mirror::Object* ref) REQUIRES_SHARED(Locks::mutator_lock_);
+  void PushOntoLocalMarkStack(mirror::Object* ref) REQUIRES_SHARED(Locks::mutator_lock_);
+  void ProcessMarkStackForMarkingAndComputeLiveBytes() REQUIRES_SHARED(Locks::mutator_lock_)
+      REQUIRES(!mark_stack_lock_);
+
   space::RegionSpace* region_space_;      // The underlying region space.
   std::unique_ptr<Barrier> gc_barrier_;
   std::unique_ptr<accounting::ObjectStack> gc_mark_stack_;
+
+  // If true, enable generational collection when using the Concurrent Copying
+  // (CC) collector, i.e. use sticky-bit CC for minor collections and (full) CC
+  // for major collections. Generational CC collection is currently only
+  // compatible with Baker read barriers. Set in Heap constructor.
+  const bool use_generational_cc_;
+
+  // Generational "sticky", only trace through dirty objects in region space.
+  const bool young_gen_;
+
+  // If true, the GC thread is done scanning marked objects on dirty and aged
+  // card (see ConcurrentCopying::CopyingPhase).
+  Atomic<bool> done_scanning_;
 
   // The read-barrier mark-bit stack. Stores object references whose
   // mark bit has been set by ConcurrentCopying::MarkFromReadBarrier,
@@ -315,7 +350,6 @@ class ConcurrentCopying : public GarbageCollector {
   // (see use case in ConcurrentCopying::MarkFromReadBarrier).
   bool rb_mark_bit_stack_full_;
 
-  std::vector<mirror::Object*> false_gray_stack_ GUARDED_BY(mark_stack_lock_);
   Mutex mark_stack_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
   std::vector<accounting::ObjectStack*> revoked_mark_stacks_
       GUARDED_BY(mark_stack_lock_);
@@ -359,10 +393,12 @@ class ConcurrentCopying : public GarbageCollector {
   Atomic<uint64_t> cumulative_bytes_moved_;
   Atomic<uint64_t> cumulative_objects_moved_;
 
-  // copied_live_bytes_ratio_sum_ and gc_count_ are read and written by CC per
-  // GC, in ReclaimPhase, and are read by DumpPerformanceInfo (potentially from
-  // another thread). However, at present, DumpPerformanceInfo is only called
-  // when the runtime shuts down, so no concurrent access.
+  // copied_live_bytes_ratio_sum_ is read and written by CC per GC, in
+  // ReclaimPhase, and is read by DumpPerformanceInfo (potentially from another
+  // thread). However, at present, DumpPerformanceInfo is only called when the
+  // runtime shuts down, so no concurrent access. The same reasoning goes for
+  // gc_count_ and reclaimed_bytes_ratio_sum_
+
   // The sum of of all copied live bytes ratio (to_bytes/from_bytes)
   float copied_live_bytes_ratio_sum_;
   // The number of GC counts, used to calculate the average above. (It doesn't
@@ -370,12 +406,13 @@ class ConcurrentCopying : public GarbageCollector {
   // possible for minor GC if all allocated objects are in non-moving
   // space.)
   size_t gc_count_;
+  // Bit is set if the corresponding object has inter-region references that
+  // were found during the marking phase of two-phase full-heap GC cycle.
+  std::unique_ptr<accounting::ContinuousSpaceBitmap> region_space_inter_region_bitmap_;
+  std::unique_ptr<accounting::ContinuousSpaceBitmap> non_moving_space_inter_region_bitmap_;
 
-  // Generational "sticky", only trace through dirty objects in region space.
-  const bool young_gen_;
-  // If true, the GC thread is done scanning marked objects on dirty and aged
-  // card (see ConcurrentCopying::MarkingPhase).
-  Atomic<bool> done_scanning_;
+  // reclaimed_bytes_ratio = reclaimed_bytes/num_allocated_bytes per GC cycle
+  float reclaimed_bytes_ratio_sum_;
 
   // The skipped blocks are memory blocks/chucks that were copies of
   // objects that were unused due to lost races (cas failures) at
@@ -416,6 +453,9 @@ class ConcurrentCopying : public GarbageCollector {
   // ConcurrentCopying::SweepArray).
   MemMap sweep_array_free_buffer_mem_map_;
 
+  // Use signed because after_gc may be larger than before_gc.
+  int64_t num_bytes_allocated_before_gc_;
+
   class ActivateReadBarrierEntrypointsCallback;
   class ActivateReadBarrierEntrypointsCheckpoint;
   class AssertToSpaceInvariantFieldVisitor;
@@ -437,6 +477,10 @@ class ConcurrentCopying : public GarbageCollector {
   class VerifyNoFromSpaceRefsFieldVisitor;
   class VerifyNoFromSpaceRefsVisitor;
   class VerifyNoMissingCardMarkVisitor;
+  class ImmuneSpaceCaptureRefsVisitor;
+  template <bool kAtomicTestAndSet = false> class CaptureRootsForMarkingVisitor;
+  class CaptureThreadRootsForMarkingAndCheckpoint;
+  template <bool kHandleInterRegionRefs> class ComputeLiveBytesAndMarkRefFieldsVisitor;
 
   DISALLOW_IMPLICIT_CONSTRUCTORS(ConcurrentCopying);
 };

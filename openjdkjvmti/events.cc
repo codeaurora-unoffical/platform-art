@@ -34,6 +34,7 @@
 #include <array>
 #include <sys/time.h>
 
+#include "arch/context.h"
 #include "art_field-inl.h"
 #include "art_jvmti.h"
 #include "art_method-inl.h"
@@ -960,7 +961,7 @@ static uint32_t GetInstrumentationEventsFor(ArtJvmtiEvent event) {
       return art::instrumentation::Instrumentation::kExceptionHandled;
     default:
       LOG(FATAL) << "Unknown event ";
-      return 0;
+      UNREACHABLE();
   }
 }
 

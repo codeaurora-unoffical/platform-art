@@ -26,6 +26,7 @@
 #include "base/arena_allocator.h"
 #include "base/arena_containers.h"
 #include "base/dumpable.h"
+#include "base/logging.h"
 #include "base/macros.h"
 #include "base/mutex.h"
 #include "base/scoped_arena_allocator.h"
@@ -161,7 +162,7 @@ class PassObserver : public ValueObject {
     VLOG(compiler) << "Starting pass: " << pass_name;
     // Dump graph first, then start timer.
     if (visualizer_enabled_) {
-      visualizer_.DumpGraph(pass_name, /* is_after_pass */ false, graph_in_bad_state_);
+      visualizer_.DumpGraph(pass_name, /* is_after_pass= */ false, graph_in_bad_state_);
       FlushVisualizer();
     }
     if (timing_logger_enabled_) {
@@ -183,7 +184,7 @@ class PassObserver : public ValueObject {
       timing_logger_.EndTiming();
     }
     if (visualizer_enabled_) {
-      visualizer_.DumpGraph(pass_name, /* is_after_pass */ true, graph_in_bad_state_);
+      visualizer_.DumpGraph(pass_name, /* is_after_pass= */ true, graph_in_bad_state_);
       FlushVisualizer();
     }
 
@@ -271,7 +272,7 @@ class OptimizingCompiler final : public Compiler {
 
   bool CanCompileMethod(uint32_t method_idx, const DexFile& dex_file) const override;
 
-  CompiledMethod* Compile(const DexFile::CodeItem* code_item,
+  CompiledMethod* Compile(const dex::CodeItem* code_item,
                           uint32_t access_flags,
                           InvokeType invoke_type,
                           uint16_t class_def_idx,
@@ -320,7 +321,6 @@ class OptimizingCompiler final : public Compiler {
         graph,
         compilation_stats_.get(),
         codegen,
-        GetCompilerDriver(),
         dex_compilation_unit,
         handles);
     DCHECK_EQ(length, optimizations.size());
@@ -370,7 +370,7 @@ class OptimizingCompiler final : public Compiler {
   CompiledMethod* Emit(ArenaAllocator* allocator,
                        CodeVectorAllocator* code_allocator,
                        CodeGenerator* codegen,
-                       const DexFile::CodeItem* item) const;
+                       const dex::CodeItem* item) const;
 
   // Try compiling a method and return the code generator used for
   // compiling it.
@@ -760,12 +760,12 @@ static ArenaVector<linker::LinkerPatch> EmitAndSortLinkerPatches(CodeGenerator* 
 CompiledMethod* OptimizingCompiler::Emit(ArenaAllocator* allocator,
                                          CodeVectorAllocator* code_allocator,
                                          CodeGenerator* codegen,
-                                         const DexFile::CodeItem* code_item_for_osr_check) const {
+                                         const dex::CodeItem* code_item_for_osr_check) const {
   ArenaVector<linker::LinkerPatch> linker_patches = EmitAndSortLinkerPatches(codegen);
   ScopedArenaVector<uint8_t> stack_map = codegen->BuildStackMaps(code_item_for_osr_check);
 
   CompiledMethod* compiled_method = CompiledMethod::SwapAllocCompiledMethod(
-      GetCompilerDriver(),
+      GetCompilerDriver()->GetCompiledMethodStorage(),
       codegen->GetInstructionSet(),
       code_allocator->GetMemory(),
       ArrayRef<const uint8_t>(stack_map),
@@ -799,7 +799,7 @@ CodeGenerator* OptimizingCompiler::TryCompile(ArenaAllocator* allocator,
   InstructionSet instruction_set = compiler_options.GetInstructionSet();
   const DexFile& dex_file = *dex_compilation_unit.GetDexFile();
   uint32_t method_idx = dex_compilation_unit.GetDexMethodIndex();
-  const DexFile::CodeItem* code_item = dex_compilation_unit.GetCodeItem();
+  const dex::CodeItem* code_item = dex_compilation_unit.GetCodeItem();
 
   // Always use the Thumb-2 assembler: some runtime functionality
   // (like implicit stack overflow checks) assume Thumb-2.
@@ -828,6 +828,29 @@ CodeGenerator* OptimizingCompiler::TryCompile(ArenaAllocator* allocator,
   }
 
   CodeItemDebugInfoAccessor code_item_accessor(dex_file, code_item, method_idx);
+
+  bool dead_reference_safe;
+  ArrayRef<const uint8_t> interpreter_metadata;
+  // For AOT compilation, we may not get a method, for example if its class is erroneous,
+  // possibly due to an unavailable superclass.  JIT should always have a method.
+  DCHECK(Runtime::Current()->IsAotCompiler() || method != nullptr);
+  if (method != nullptr) {
+    const dex::ClassDef* containing_class;
+    {
+      ScopedObjectAccess soa(Thread::Current());
+      containing_class = &method->GetClassDef();
+      interpreter_metadata = method->GetQuickenedInfo();
+    }
+    // MethodContainsRSensitiveAccess is currently slow, but HasDeadReferenceSafeAnnotation()
+    // is currently rarely true.
+    dead_reference_safe =
+        annotations::HasDeadReferenceSafeAnnotation(dex_file, *containing_class)
+        && !annotations::MethodContainsRSensitiveAccess(dex_file, *containing_class, method_idx);
+  } else {
+    // If we could not resolve the class, conservatively assume it's dead-reference unsafe.
+    dead_reference_safe = false;
+  }
+
   HGraph* graph = new (allocator) HGraph(
       allocator,
       arena_stack,
@@ -835,17 +858,12 @@ CodeGenerator* OptimizingCompiler::TryCompile(ArenaAllocator* allocator,
       method_idx,
       compiler_options.GetInstructionSet(),
       kInvalidInvokeType,
+      dead_reference_safe,
       compiler_driver->GetCompilerOptions().GetDebuggable(),
-      osr);
+      /* osr= */ osr);
 
-  ArrayRef<const uint8_t> interpreter_metadata;
-  // For AOT compilation, we may not get a method, for example if its class is erroneous.
-  // JIT should always have a method.
-  DCHECK(Runtime::Current()->IsAotCompiler() || method != nullptr);
   if (method != nullptr) {
     graph->SetArtMethod(method);
-    ScopedObjectAccess soa(Thread::Current());
-    interpreter_metadata = method->GetQuickenedInfo();
   }
 
   std::unique_ptr<CodeGenerator> codegen(
@@ -961,10 +979,11 @@ CodeGenerator* OptimizingCompiler::TryCompileIntrinsic(
       arena_stack,
       dex_file,
       method_idx,
-      compiler_driver->GetCompilerOptions().GetInstructionSet(),
+      compiler_options.GetInstructionSet(),
       kInvalidInvokeType,
-      compiler_driver->GetCompilerOptions().GetDebuggable(),
-      /* osr */ false);
+      /* dead_reference_safe= */ true,  // Intrinsics don't affect dead reference safety.
+      compiler_options.GetDebuggable(),
+      /* osr= */ false);
 
   DCHECK(Runtime::Current()->IsAotCompiler());
   DCHECK(method != nullptr);
@@ -994,7 +1013,7 @@ CodeGenerator* OptimizingCompiler::TryCompileIntrinsic(
                           &dex_compilation_unit,
                           codegen.get(),
                           compilation_stats_.get(),
-                          /* interpreter_metadata */ ArrayRef<const uint8_t>(),
+                          /* interpreter_metadata= */ ArrayRef<const uint8_t>(),
                           handles);
     builder.BuildIntrinsicGraph(method);
   }
@@ -1033,7 +1052,7 @@ CodeGenerator* OptimizingCompiler::TryCompileIntrinsic(
   return codegen.release();
 }
 
-CompiledMethod* OptimizingCompiler::Compile(const DexFile::CodeItem* code_item,
+CompiledMethod* OptimizingCompiler::Compile(const dex::CodeItem* code_item,
                                             uint32_t access_flags,
                                             InvokeType invoke_type,
                                             uint16_t class_def_idx,
@@ -1042,12 +1061,13 @@ CompiledMethod* OptimizingCompiler::Compile(const DexFile::CodeItem* code_item,
                                             const DexFile& dex_file,
                                             Handle<mirror::DexCache> dex_cache) const {
   CompilerDriver* compiler_driver = GetCompilerDriver();
+  const CompilerOptions& compiler_options = compiler_driver->GetCompilerOptions();
   CompiledMethod* compiled_method = nullptr;
   Runtime* runtime = Runtime::Current();
   DCHECK(runtime->IsAotCompiler());
-  const VerifiedMethod* verified_method = compiler_driver->GetVerifiedMethod(&dex_file, method_idx);
+  const VerifiedMethod* verified_method = compiler_options.GetVerifiedMethod(&dex_file, method_idx);
   DCHECK(!verified_method->HasRuntimeThrow());
-  if (compiler_driver->IsMethodVerifiedWithoutFailures(method_idx, class_def_idx, dex_file) ||
+  if (compiler_options.IsMethodVerifiedWithoutFailures(method_idx, class_def_idx, dex_file) ||
       verifier::CanCompilerHandleVerificationFailure(
           verified_method->GetEncounteredVerificationFailures())) {
     ArenaAllocator allocator(runtime->GetArenaPool());
@@ -1079,7 +1099,7 @@ CompiledMethod* OptimizingCompiler::Compile(const DexFile::CodeItem* code_item,
       // Go to native so that we don't block GC during compilation.
       ScopedThreadSuspension sts(soa.Self(), kNative);
       if (method != nullptr && UNLIKELY(method->IsIntrinsic())) {
-        DCHECK(compiler_driver->GetCompilerOptions().IsBootImage());
+        DCHECK(compiler_options.IsBootImage());
         codegen.reset(
             TryCompileIntrinsic(&allocator,
                                 &arena_stack,
@@ -1098,7 +1118,7 @@ CompiledMethod* OptimizingCompiler::Compile(const DexFile::CodeItem* code_item,
                        &code_allocator,
                        dex_compilation_unit,
                        method,
-                       compiler_driver->GetCompilerOptions().IsBaseline(),
+                       compiler_options.IsBaseline(),
                        /* osr= */ false,
                        &handles));
       }
@@ -1127,7 +1147,7 @@ CompiledMethod* OptimizingCompiler::Compile(const DexFile::CodeItem* code_item,
     }
   } else {
     MethodCompilationStat method_stat;
-    if (compiler_driver->GetCompilerOptions().VerifyAtRuntime()) {
+    if (compiler_options.VerifyAtRuntime()) {
       method_stat = MethodCompilationStat::kNotCompiledVerifyAtRuntime;
     } else {
       method_stat = MethodCompilationStat::kNotCompiledVerificationError;
@@ -1136,8 +1156,8 @@ CompiledMethod* OptimizingCompiler::Compile(const DexFile::CodeItem* code_item,
   }
 
   if (kIsDebugBuild &&
-      compiler_driver->GetCompilerOptions().CompilingWithCoreImage() &&
-      IsInstructionSetSupported(compiler_driver->GetCompilerOptions().GetInstructionSet())) {
+      compiler_options.CompilingWithCoreImage() &&
+      IsInstructionSetSupported(compiler_options.GetInstructionSet())) {
     // For testing purposes, we put a special marker on method names
     // that should be compiled with this compiler (when the
     // instruction set is supported). This makes sure we're not
@@ -1160,7 +1180,7 @@ static ScopedArenaVector<uint8_t> CreateJniStackMap(ScopedArenaAllocator* alloca
       jni_compiled_method.GetFrameSize(),
       jni_compiled_method.GetCoreSpillMask(),
       jni_compiled_method.GetFpSpillMask(),
-      /* num_dex_registers */ 0);
+      /* num_dex_registers= */ 0);
   stack_map_stream->EndMethod();
   return stack_map_stream->Encode();
 }
@@ -1207,7 +1227,7 @@ CompiledMethod* OptimizingCompiler::JniCompile(uint32_t access_flags,
         CompiledMethod* compiled_method = Emit(&allocator,
                                                &code_allocator,
                                                codegen.get(),
-                                               /* code_item_for_osr_check */ nullptr);
+                                               /* item= */ nullptr);
         compiled_method->MarkAsIntrinsic();
         return compiled_method;
       }
@@ -1222,12 +1242,12 @@ CompiledMethod* OptimizingCompiler::JniCompile(uint32_t access_flags,
   ScopedArenaVector<uint8_t> stack_map = CreateJniStackMap(&stack_map_allocator,
                                                            jni_compiled_method);
   return CompiledMethod::SwapAllocCompiledMethod(
-      GetCompilerDriver(),
+      GetCompilerDriver()->GetCompiledMethodStorage(),
       jni_compiled_method.GetInstructionSet(),
       jni_compiled_method.GetCode(),
       ArrayRef<const uint8_t>(stack_map),
       jni_compiled_method.GetCfi(),
-      /* patches */ ArrayRef<const linker::LinkerPatch>());
+      /* patches= */ ArrayRef<const linker::LinkerPatch>());
 }
 
 Compiler* CreateOptimizingCompiler(CompilerDriver* driver) {
@@ -1253,7 +1273,7 @@ bool OptimizingCompiler::JitCompile(Thread* self,
 
   const DexFile* dex_file = method->GetDexFile();
   const uint16_t class_def_idx = method->GetClassDefIndex();
-  const DexFile::CodeItem* code_item = dex_file->GetCodeItem(method->GetCodeItemOffset());
+  const dex::CodeItem* code_item = dex_file->GetCodeItem(method->GetCodeItemOffset());
   const uint32_t method_idx = method->GetDexMethodIndex();
   const uint32_t access_flags = method->GetAccessFlags();
 
@@ -1276,7 +1296,7 @@ bool OptimizingCompiler::JitCompile(Thread* self,
     uint8_t* roots_data = nullptr;
     uint32_t data_size = code_cache->ReserveData(self,
                                                  stack_map.size(),
-                                                 /* number_of_roots */ 0,
+                                                 /* number_of_roots= */ 0,
                                                  method,
                                                  &stack_map_data,
                                                  &roots_data);
@@ -1296,7 +1316,7 @@ bool OptimizingCompiler::JitCompile(Thread* self,
         data_size,
         osr,
         roots,
-        /* has_should_deoptimize_flag */ false,
+        /* has_should_deoptimize_flag= */ false,
         cha_single_implementation_list);
     if (code == nullptr) {
       return false;
@@ -1455,27 +1475,31 @@ bool OptimizingCompiler::JitCompile(Thread* self,
   return true;
 }
 
-void OptimizingCompiler::GenerateJitDebugInfo(
-    ArtMethod* method, const debug::MethodDebugInfo& info) {
+void OptimizingCompiler::GenerateJitDebugInfo(ArtMethod* method ATTRIBUTE_UNUSED,
+                                              const debug::MethodDebugInfo& info) {
   const CompilerOptions& compiler_options = GetCompilerDriver()->GetCompilerOptions();
   DCHECK(compiler_options.GenerateAnyDebugInfo());
+  TimingLogger logger("Generate JIT debug info logger", true, VLOG_IS_ON(jit));
+  {
+    TimingLogger::ScopedTiming st("Generate JIT debug info", &logger);
 
-  // If both flags are passed, generate full debug info.
-  const bool mini_debug_info = !compiler_options.GetGenerateDebugInfo();
+    // If both flags are passed, generate full debug info.
+    const bool mini_debug_info = !compiler_options.GetGenerateDebugInfo();
 
-  // Create entry for the single method that we just compiled.
-  std::vector<uint8_t> elf_file = debug::MakeElfFileForJIT(
-      compiler_options.GetInstructionSet(),
-      compiler_options.GetInstructionSetFeatures(),
-      mini_debug_info,
-      ArrayRef<const debug::MethodDebugInfo>(&info, 1));
-  MutexLock mu(Thread::Current(), *Locks::native_debug_interface_lock_);
-  AddNativeDebugInfoForJit(reinterpret_cast<const void*>(info.code_address), elf_file);
-
-  VLOG(jit)
-      << "JIT mini-debug-info added for " << ArtMethod::PrettyMethod(method)
-      << " size=" << PrettySize(elf_file.size())
-      << " total_size=" << PrettySize(GetJitNativeDebugInfoMemUsage());
+    // Create entry for the single method that we just compiled.
+    std::vector<uint8_t> elf_file = debug::MakeElfFileForJIT(
+        compiler_options.GetInstructionSet(),
+        compiler_options.GetInstructionSetFeatures(),
+        mini_debug_info,
+        info);
+    AddNativeDebugInfoForJit(Thread::Current(),
+                             reinterpret_cast<const void*>(info.code_address),
+                             elf_file,
+                             debug::PackElfFileForJIT,
+                             compiler_options.GetInstructionSet(),
+                             compiler_options.GetInstructionSetFeatures());
+  }
+  Runtime::Current()->GetJit()->AddTimingLogger(logger);
 }
 
 }  // namespace art

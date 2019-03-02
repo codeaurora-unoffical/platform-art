@@ -113,15 +113,18 @@ static hiddenapi::AccessContext GetReflectionCaller(Thread* self)
                          : hiddenapi::AccessContext(caller);
 }
 
+static std::function<hiddenapi::AccessContext()> GetHiddenapiAccessContextFunction(Thread* self) {
+  return [=]() REQUIRES_SHARED(Locks::mutator_lock_) { return GetReflectionCaller(self); };
+}
+
 // Returns true if the first non-ClassClass caller up the stack should not be
 // allowed access to `member`.
 template<typename T>
 ALWAYS_INLINE static bool ShouldDenyAccessToMember(T* member, Thread* self)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  return hiddenapi::ShouldDenyAccessToMember(
-      member,
-      [&]() REQUIRES_SHARED(Locks::mutator_lock_) { return GetReflectionCaller(self); },
-      hiddenapi::AccessMethod::kReflection);
+  return hiddenapi::ShouldDenyAccessToMember(member,
+                                             GetHiddenapiAccessContextFunction(self),
+                                             hiddenapi::AccessMethod::kReflection);
 }
 
 // Returns true if a class member should be discoverable with reflection given
@@ -130,7 +133,7 @@ ALWAYS_INLINE static bool ShouldDenyAccessToMember(T* member, Thread* self)
 // callers (hiddenapi_context).
 template<typename T>
 ALWAYS_INLINE static bool IsDiscoverable(bool public_only,
-                                         hiddenapi::AccessContext access_context,
+                                         const hiddenapi::AccessContext& access_context,
                                          T* member)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   if (public_only && ((member->GetAccessFlags() & kAccPublic) == 0)) {
@@ -220,7 +223,7 @@ static jobjectArray Class_getInterfacesInternal(JNIEnv* env, jobject javaThis) {
     return soa.AddLocalReference<jobjectArray>(klass->GetProxyInterfaces()->Clone(soa.Self()));
   }
 
-  const DexFile::TypeList* iface_list = klass->GetInterfaceTypeList();
+  const dex::TypeList* iface_list = klass->GetInterfaceTypeList();
   if (iface_list == nullptr) {
     return nullptr;
   }
@@ -508,8 +511,9 @@ static jobject Class_getDeclaredConstructorInternal(
 }
 
 static ALWAYS_INLINE inline bool MethodMatchesConstructor(
-    ArtMethod* m, bool public_only, hiddenapi::AccessContext hiddenapi_context)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
+    ArtMethod* m,
+    bool public_only,
+    const hiddenapi::AccessContext& hiddenapi_context) REQUIRES_SHARED(Locks::mutator_lock_) {
   DCHECK(m != nullptr);
   return m->IsConstructor() &&
          !m->IsStatic() &&
@@ -562,7 +566,8 @@ static jobject Class_getDeclaredMethodInternal(JNIEnv* env, jobject javaThis,
           soa.Self(),
           DecodeClass(soa, javaThis),
           soa.Decode<mirror::String>(name),
-          soa.Decode<mirror::ObjectArray<mirror::Class>>(args)));
+          soa.Decode<mirror::ObjectArray<mirror::Class>>(args),
+          GetHiddenapiAccessContextFunction(soa.Self())));
   if (result == nullptr || ShouldDenyAccessToMember(result->GetArtMethod(), soa.Self())) {
     return nullptr;
   }

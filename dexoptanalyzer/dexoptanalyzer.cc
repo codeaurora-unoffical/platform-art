@@ -52,6 +52,7 @@ static char** original_argv;
 
 static std::string CommandLine() {
   std::vector<std::string> command;
+  command.reserve(original_argc);
   for (int i = 0; i < original_argc; ++i) {
     command.push_back(original_argv[i]);
   }
@@ -95,6 +96,11 @@ NO_RETURN static void Usage(const char *fmt, ...) {
   UsageError("  --image=<filename>: optional, the image to be used to decide if the associated");
   UsageError("       oat file is up to date. Defaults to $ANDROID_ROOT/framework/boot.art.");
   UsageError("       Example: --image=/system/framework/boot.art");
+  UsageError("");
+  UsageError("  --runtime-arg <argument>: used to specify various arguments for the runtime,");
+  UsageError("      such as initial heap size, maximum heap size, and verbose output.");
+  UsageError("      Use a separate --runtime-arg switch for each argument.");
+  UsageError("      Example: --runtime-arg -Xms256m");
   UsageError("");
   UsageError("  --android-data=<directory>: optional, the directory which should be used as");
   UsageError("       android-data. By default ANDROID_DATA env variable is used.");
@@ -167,6 +173,12 @@ class DexoptAnalyzer final {
         }
       } else if (option.starts_with("--image=")) {
         image_ = option.substr(strlen("--image=")).ToString();
+      } else if (option == "--runtime-arg") {
+        if (i + 1 == argc) {
+          Usage("Missing argument for --runtime-arg\n");
+        }
+        ++i;
+        runtime_args_.push_back(argv[i]);
       } else if (option.starts_with("--android-data=")) {
         // Overwrite android-data if needed (oat file assistant relies on a valid directory to
         // compute dalvik-cache folder). This is mostly used in tests.
@@ -190,11 +202,7 @@ class DexoptAnalyzer final {
             Usage("Invalid --zip-fd %d", zip_fd_);
           }
       } else if (option.starts_with("--class-loader-context=")) {
-        std::string context_str = option.substr(strlen("--class-loader-context=")).ToString();
-        class_loader_context_ = ClassLoaderContext::Create(context_str);
-        if (class_loader_context_ == nullptr) {
-          Usage("Invalid --class-loader-context '%s'", context_str.c_str());
-        }
+        context_str_ = option.substr(strlen("--class-loader-context=")).ToString();
       } else {
         Usage("Unknown argument '%s'", option.data());
       }
@@ -217,10 +225,14 @@ class DexoptAnalyzer final {
     RuntimeOptions options;
     // The image could be custom, so make sure we explicitly pass it.
     std::string img = "-Ximage:" + image_;
-    options.push_back(std::make_pair(img.c_str(), nullptr));
+    options.push_back(std::make_pair(img, nullptr));
     // The instruction set of the image should match the instruction set we will test.
     const void* isa_opt = reinterpret_cast<const void*>(GetInstructionSetString(isa_));
     options.push_back(std::make_pair("imageinstructionset", isa_opt));
+    // Explicit runtime args.
+    for (const char* runtime_arg : runtime_args_) {
+      options.push_back(std::make_pair(runtime_arg, nullptr));
+    }
      // Disable libsigchain. We don't don't need it to evaluate DexOptNeeded status.
     options.push_back(std::make_pair("-Xno-sig-chain", nullptr));
     // Pretend we are a compiler so that we can re-use the same infrastructure to load a different
@@ -248,6 +260,17 @@ class DexoptAnalyzer final {
     }
     std::unique_ptr<Runtime> runtime(Runtime::Current());
 
+    // Only when the runtime is created can we create the class loader context: the
+    // class loader context will open dex file and use the MemMap global lock that the
+    // runtime owns.
+    std::unique_ptr<ClassLoaderContext> class_loader_context;
+    if (!context_str_.empty()) {
+      class_loader_context = ClassLoaderContext::Create(context_str_);
+      if (class_loader_context == nullptr) {
+        Usage("Invalid --class-loader-context '%s'", context_str_.c_str());
+      }
+    }
+
     std::unique_ptr<OatFileAssistant> oat_file_assistant;
     oat_file_assistant = std::make_unique<OatFileAssistant>(dex_file_.c_str(),
                                                             isa_,
@@ -263,7 +286,7 @@ class DexoptAnalyzer final {
     }
 
     int dexoptNeeded = oat_file_assistant->GetDexOptNeeded(
-        compiler_filter_, assume_profile_changed_, downgrade_, class_loader_context_.get());
+        compiler_filter_, assume_profile_changed_, downgrade_, class_loader_context.get());
 
     // Convert OatFileAssitant codes to dexoptanalyzer codes.
     switch (dexoptNeeded) {
@@ -284,10 +307,11 @@ class DexoptAnalyzer final {
   std::string dex_file_;
   InstructionSet isa_;
   CompilerFilter::Filter compiler_filter_;
-  std::unique_ptr<ClassLoaderContext> class_loader_context_;
+  std::string context_str_;
   bool assume_profile_changed_;
   bool downgrade_;
   std::string image_;
+  std::vector<const char*> runtime_args_;
   int oat_fd_ = -1;
   int vdex_fd_ = -1;
   // File descriptor corresponding to apk, dex_file, or zip.

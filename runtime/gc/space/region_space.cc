@@ -17,6 +17,7 @@
 #include "bump_pointer_space-inl.h"
 #include "bump_pointer_space.h"
 #include "base/dumpable.h"
+#include "base/logging.h"
 #include "gc/accounting/read_barrier_table.h"
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
@@ -92,11 +93,12 @@ MemMap RegionSpace::CreateMemMap(const std::string& name,
   return mem_map;
 }
 
-RegionSpace* RegionSpace::Create(const std::string& name, MemMap&& mem_map) {
-  return new RegionSpace(name, std::move(mem_map));
+RegionSpace* RegionSpace::Create(
+    const std::string& name, MemMap&& mem_map, bool use_generational_cc) {
+  return new RegionSpace(name, std::move(mem_map), use_generational_cc);
 }
 
-RegionSpace::RegionSpace(const std::string& name, MemMap&& mem_map)
+RegionSpace::RegionSpace(const std::string& name, MemMap&& mem_map, bool use_generational_cc)
     : ContinuousMemMapAllocSpace(name,
                                  std::move(mem_map),
                                  mem_map.Begin(),
@@ -104,6 +106,7 @@ RegionSpace::RegionSpace(const std::string& name, MemMap&& mem_map)
                                  mem_map.End(),
                                  kGcRetentionPolicyAlwaysCollect),
       region_lock_("Region lock", kRegionSpaceRegionLock),
+      use_generational_cc_(use_generational_cc),
       time_(1U),
       num_regions_(mem_map_.Size() / kRegionSize),
       num_non_free_regions_(0U),
@@ -178,9 +181,44 @@ size_t RegionSpace::ToSpaceSize() {
   return num_regions * kRegionSize;
 }
 
+void RegionSpace::Region::SetAsUnevacFromSpace(bool clear_live_bytes) {
+  // Live bytes are only preserved (i.e. not cleared) during sticky-bit CC collections.
+  DCHECK(GetUseGenerationalCC() || clear_live_bytes);
+  DCHECK(!IsFree() && IsInToSpace());
+  type_ = RegionType::kRegionTypeUnevacFromSpace;
+  if (IsNewlyAllocated()) {
+    // A newly allocated region set as unevac from-space must be
+    // a large or large tail region.
+    DCHECK(IsLarge() || IsLargeTail()) << static_cast<uint>(state_);
+    // Always clear the live bytes of a newly allocated (large or
+    // large tail) region.
+    clear_live_bytes = true;
+    // Clear the "newly allocated" status here, as we do not want the
+    // GC to see it when encountering (and processing) references in the
+    // from-space.
+    //
+    // Invariant: There should be no newly-allocated region in the
+    // from-space (when the from-space exists, which is between the calls
+    // to RegionSpace::SetFromSpace and RegionSpace::ClearFromSpace).
+    is_newly_allocated_ = false;
+  }
+  if (clear_live_bytes) {
+    // Reset the live bytes, as we have made a non-evacuation
+    // decision (possibly based on the percentage of live bytes).
+    live_bytes_ = 0;
+  }
+}
+
+bool RegionSpace::Region::GetUseGenerationalCC() {
+  // We are retrieving the info from Heap, instead of the cached version in
+  // RegionSpace, because accessing the Heap from a Region object is easier
+  // than accessing the RegionSpace.
+  return art::Runtime::Current()->GetHeap()->GetUseGenerationalCC();
+}
+
 inline bool RegionSpace::Region::ShouldBeEvacuated(EvacMode evac_mode) {
   // Evacuation mode `kEvacModeNewlyAllocated` is only used during sticky-bit CC collections.
-  DCHECK(kEnableGenerationalConcurrentCopyingCollection || (evac_mode != kEvacModeNewlyAllocated));
+  DCHECK(GetUseGenerationalCC() || (evac_mode != kEvacModeNewlyAllocated));
   DCHECK((IsAllocated() || IsLarge()) && IsInToSpace());
   // The region should be evacuated if:
   // - the evacuation is forced (`evac_mode == kEvacModeForceAll`); or
@@ -252,7 +290,7 @@ inline bool RegionSpace::Region::ShouldBeEvacuated(EvacMode evac_mode) {
 
 void RegionSpace::ZeroLiveBytesForLargeObject(mirror::Object* obj) {
   // This method is only used when Generational CC collection is enabled.
-  DCHECK(kEnableGenerationalConcurrentCopyingCollection);
+  DCHECK(use_generational_cc_);
 
   // This code uses a logic similar to the one used in RegionSpace::FreeLarge
   // to traverse the regions supporting `obj`.
@@ -291,7 +329,7 @@ void RegionSpace::SetFromSpace(accounting::ReadBarrierTable* rb_table,
                                EvacMode evac_mode,
                                bool clear_live_bytes) {
   // Live bytes are only preserved (i.e. not cleared) during sticky-bit CC collections.
-  DCHECK(kEnableGenerationalConcurrentCopyingCollection || clear_live_bytes);
+  DCHECK(use_generational_cc_ || clear_live_bytes);
   ++time_;
   if (kUseTableLookupReadBarrier) {
     DCHECK(rb_table->IsAllCleared());
@@ -318,6 +356,7 @@ void RegionSpace::SetFromSpace(accounting::ReadBarrierTable* rb_table,
                 state == RegionState::kRegionStateLarge) &&
                type == RegionType::kRegionTypeToSpace);
         bool should_evacuate = r->ShouldBeEvacuated(evac_mode);
+        bool is_newly_allocated = r->IsNewlyAllocated();
         if (should_evacuate) {
           r->SetAsFromSpace();
           DCHECK(r->IsInFromSpace());
@@ -328,6 +367,15 @@ void RegionSpace::SetFromSpace(accounting::ReadBarrierTable* rb_table,
         if (UNLIKELY(state == RegionState::kRegionStateLarge &&
                      type == RegionType::kRegionTypeToSpace)) {
           prev_large_evacuated = should_evacuate;
+          // In 2-phase full heap GC, this function is called after marking is
+          // done. So, it is possible that some newly allocated large object is
+          // marked but its live_bytes is still -1. We need to clear the
+          // mark-bit otherwise the live_bytes will not be updated in
+          // ConcurrentCopying::ProcessMarkStackRef() and hence will break the
+          // logic.
+          if (use_generational_cc_ && !should_evacuate && is_newly_allocated) {
+            GetMarkBitmap()->Clear(reinterpret_cast<mirror::Object*>(r->Begin()));
+          }
           num_expected_large_tails = RoundUp(r->BytesAllocated(), kRegionSize) / kRegionSize - 1;
           DCHECK_GT(num_expected_large_tails, 0U);
         }
@@ -366,7 +414,8 @@ static void ZeroAndProtectRegion(uint8_t* begin, uint8_t* end) {
 }
 
 void RegionSpace::ClearFromSpace(/* out */ uint64_t* cleared_bytes,
-                                 /* out */ uint64_t* cleared_objects) {
+                                 /* out */ uint64_t* cleared_objects,
+                                 const bool clear_bitmap) {
   DCHECK(cleared_bytes != nullptr);
   DCHECK(cleared_objects != nullptr);
   *cleared_bytes = 0;
@@ -394,13 +443,18 @@ void RegionSpace::ClearFromSpace(/* out */ uint64_t* cleared_bytes,
   // (see b/62194020).
   uint8_t* clear_block_begin = nullptr;
   uint8_t* clear_block_end = nullptr;
-  auto clear_region = [&clear_block_begin, &clear_block_end](Region* r) {
+  auto clear_region = [this, &clear_block_begin, &clear_block_end, clear_bitmap](Region* r) {
     r->Clear(/*zero_and_release_pages=*/false);
     if (clear_block_end != r->Begin()) {
       // Region `r` is not adjacent to the current clear block; zero and release
       // pages within the current block and restart a new clear block at the
       // beginning of region `r`.
       ZeroAndProtectRegion(clear_block_begin, clear_block_end);
+      if (clear_bitmap) {
+        GetLiveBitmap()->ClearRange(
+            reinterpret_cast<mirror::Object*>(clear_block_begin),
+            reinterpret_cast<mirror::Object*>(clear_block_end));
+      }
       clear_block_begin = r->Begin();
     }
     // Add region `r` to the clear block.
@@ -425,20 +479,23 @@ void RegionSpace::ClearFromSpace(/* out */ uint64_t* cleared_bytes,
         // It is also better to clear these regions now instead of at the end of the next GC to
         // save RAM. If we don't clear the regions here, they will be cleared next GC by the normal
         // live percent evacuation logic.
+        *cleared_bytes += r->BytesAllocated();
+        *cleared_objects += r->ObjectsAllocated();
+        clear_region(r);
         size_t free_regions = 1;
         // Also release RAM for large tails.
         while (i + free_regions < num_regions_ && regions_[i + free_regions].IsLargeTail()) {
-          DCHECK(r->IsLarge());
           clear_region(&regions_[i + free_regions]);
           ++free_regions;
         }
-        *cleared_bytes += r->BytesAllocated();
-        *cleared_objects += r->ObjectsAllocated();
         num_non_free_regions_ -= free_regions;
-        clear_region(r);
-        GetLiveBitmap()->ClearRange(
-            reinterpret_cast<mirror::Object*>(r->Begin()),
-            reinterpret_cast<mirror::Object*>(r->Begin() + free_regions * kRegionSize));
+        // When clear_bitmap is true, this clearing of bitmap is taken care in
+        // clear_region().
+        if (!clear_bitmap) {
+          GetLiveBitmap()->ClearRange(
+              reinterpret_cast<mirror::Object*>(r->Begin()),
+              reinterpret_cast<mirror::Object*>(r->Begin() + free_regions * kRegionSize));
+        }
         continue;
       }
       r->SetUnevacFromSpaceAsToSpace();
@@ -484,7 +541,7 @@ void RegionSpace::ClearFromSpace(/* out */ uint64_t* cleared_bytes,
         // bitmap. But they cannot do so before we know the next GC cycle will
         // be a major one, so this operation happens at the beginning of such a
         // major collection, before marking starts.
-        if (!kEnableGenerationalConcurrentCopyingCollection) {
+        if (!use_generational_cc_) {
           GetLiveBitmap()->ClearRange(
               reinterpret_cast<mirror::Object*>(r->Begin()),
               reinterpret_cast<mirror::Object*>(r->Begin() + regions_to_clear_bitmap * kRegionSize));
@@ -498,8 +555,7 @@ void RegionSpace::ClearFromSpace(/* out */ uint64_t* cleared_bytes,
         // `r` when it has an undefined live bytes count (i.e. when
         // `r->LiveBytes() == static_cast<size_t>(-1)`) with
         // Generational CC.
-        if (!kEnableGenerationalConcurrentCopyingCollection ||
-            (r->LiveBytes() != static_cast<size_t>(-1))) {
+        if (!use_generational_cc_ || (r->LiveBytes() != static_cast<size_t>(-1))) {
           // Only some allocated bytes are live in this unevac region.
           // This should only happen for an allocated non-large region.
           DCHECK(r->IsAllocated()) << r->State();
@@ -518,6 +574,11 @@ void RegionSpace::ClearFromSpace(/* out */ uint64_t* cleared_bytes,
   }
   // Clear pages for the last block since clearing happens when a new block opens.
   ZeroAndReleasePages(clear_block_begin, clear_block_end - clear_block_begin);
+  if (clear_bitmap) {
+    GetLiveBitmap()->ClearRange(
+        reinterpret_cast<mirror::Object*>(clear_block_begin),
+        reinterpret_cast<mirror::Object*>(clear_block_end));
+  }
   // Update non_free_region_index_limit_.
   SetNonFreeRegionLimit(new_non_free_region_index_limit);
   evac_region_ = nullptr;
@@ -589,7 +650,7 @@ void RegionSpace::PoisonDeadObjectsInUnevacuatedRegion(Region* r) {
 
   // Functor poisoning the space between `obj` and the previously
   // visited (live) object (or the beginng of the region), if any.
-  auto maybe_poison = [this, &prev_obj_end](mirror::Object* obj) REQUIRES(Locks::mutator_lock_) {
+  auto maybe_poison = [&prev_obj_end](mirror::Object* obj) REQUIRES(Locks::mutator_lock_) {
     DCHECK_ALIGNED(obj, kAlignment);
     uint8_t* cur_obj_begin = reinterpret_cast<uint8_t*>(obj);
     if (cur_obj_begin != prev_obj_end) {
@@ -808,11 +869,44 @@ void RegionSpace::Region::Dump(std::ostream& os) const {
      << " type=" << type_
      << " objects_allocated=" << objects_allocated_
      << " alloc_time=" << alloc_time_
-     << " live_bytes=" << live_bytes_
-     << " is_newly_allocated=" << std::boolalpha << is_newly_allocated_ << std::noboolalpha
+     << " live_bytes=" << live_bytes_;
+
+  if (live_bytes_ != static_cast<size_t>(-1)) {
+    os << " ratio over allocated bytes="
+       << (static_cast<float>(live_bytes_) / RoundUp(BytesAllocated(), kRegionSize));
+    uint64_t longest_consecutive_free_bytes = GetLongestConsecutiveFreeBytes();
+    os << " longest_consecutive_free_bytes=" << longest_consecutive_free_bytes
+       << " (" << PrettySize(longest_consecutive_free_bytes) << ")";
+  }
+
+  os << " is_newly_allocated=" << std::boolalpha << is_newly_allocated_ << std::noboolalpha
      << " is_a_tlab=" << std::boolalpha << is_a_tlab_ << std::noboolalpha
      << " thread=" << thread_ << '\n';
 }
+
+uint64_t RegionSpace::Region::GetLongestConsecutiveFreeBytes() const {
+  if (IsFree()) {
+    return kRegionSize;
+  }
+  if (IsLarge() || IsLargeTail()) {
+    return 0u;
+  }
+  uintptr_t max_gap = 0u;
+  uintptr_t prev_object_end = reinterpret_cast<uintptr_t>(Begin());
+  // Iterate through all live objects and find the largest free gap.
+  auto visitor = [&max_gap, &prev_object_end](mirror::Object* obj)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+    uintptr_t current = reinterpret_cast<uintptr_t>(obj);
+    uintptr_t diff = current - prev_object_end;
+    max_gap = std::max(diff, max_gap);
+    uintptr_t object_end = reinterpret_cast<uintptr_t>(obj) + obj->SizeOf();
+    prev_object_end = RoundUp(object_end, kAlignment);
+  };
+  space::RegionSpace* region_space = art::Runtime::Current()->GetHeap()->GetRegionSpace();
+  region_space->WalkNonLargeRegion(visitor, this);
+  return static_cast<uint64_t>(max_gap);
+}
+
 
 size_t RegionSpace::AllocationSizeNonvirtual(mirror::Object* obj, size_t* usable_size) {
   size_t num_bytes = obj->SizeOf();
@@ -858,7 +952,7 @@ RegionSpace::Region* RegionSpace::AllocateRegion(bool for_evac) {
     Region* r = &regions_[region_index];
     if (r->IsFree()) {
       r->Unfree(this, time_);
-      if (kEnableGenerationalConcurrentCopyingCollection) {
+      if (use_generational_cc_) {
         // TODO: Add an explanation for this assertion.
         DCHECK(!for_evac || !r->is_newly_allocated_);
       }

@@ -38,6 +38,7 @@ GTEST_DEX_DIRECTORIES := \
   GetMethodSignature \
   HiddenApi \
   HiddenApiSignatures \
+  HiddenApiStubs \
   ImageLayoutA \
   ImageLayoutB \
   IMTA \
@@ -188,7 +189,7 @@ ART_GTEST_dexlayout_test_DEX_DEPS := ManyMethods
 ART_GTEST_dex2oat_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS) ManyMethods Statics VerifierDeps MainUncompressed EmptyUncompressed StringLiterals
 ART_GTEST_dex2oat_image_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS) Statics VerifierDeps
 ART_GTEST_exception_test_DEX_DEPS := ExceptionHandle
-ART_GTEST_hiddenapi_test_DEX_DEPS := HiddenApi
+ART_GTEST_hiddenapi_test_DEX_DEPS := HiddenApi HiddenApiStubs
 ART_GTEST_hidden_api_test_DEX_DEPS := HiddenApiSignatures
 ART_GTEST_image_test_DEX_DEPS := ImageLayoutA ImageLayoutB DefaultMethods VerifySoftFailDuringClinit
 ART_GTEST_imtable_test_DEX_DEPS := IMTA IMTB
@@ -198,7 +199,7 @@ ART_GTEST_jni_internal_test_DEX_DEPS := AllFields StaticLeafMethods MyClassNativ
 ART_GTEST_oat_file_assistant_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS)
 ART_GTEST_dexoptanalyzer_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS)
 ART_GTEST_image_space_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS)
-ART_GTEST_oat_file_test_DEX_DEPS := Main MultiDex MainUncompressed MultiDexUncompressed
+ART_GTEST_oat_file_test_DEX_DEPS := Main MultiDex MainUncompressed MultiDexUncompressed MainStripped Nested MultiDexModifiedSecondary
 ART_GTEST_oat_test_DEX_DEPS := Main
 ART_GTEST_oat_writer_test_DEX_DEPS := Main
 ART_GTEST_object_test_DEX_DEPS := ProtoCompare ProtoCompare2 StaticsFromCode XandY
@@ -216,6 +217,7 @@ ART_GTEST_heap_verification_test_DEX_DEPS := ProtoCompare ProtoCompare2 StaticsF
 ART_GTEST_verifier_deps_test_DEX_DEPS := VerifierDeps VerifierDepsMulti MultiDex
 ART_GTEST_dex_to_dex_decompiler_test_DEX_DEPS := VerifierDeps DexToDexDecompiler
 ART_GTEST_oatdump_app_test_DEX_DEPS := ProfileTestMultiDex
+ART_GTEST_oatdump_test_DEX_DEPS := ProfileTestMultiDex
 
 # The elf writer test has dependencies on core.oat.
 ART_GTEST_elf_writer_test_HOST_DEPS := $(HOST_CORE_IMAGE_DEFAULT_64) $(HOST_CORE_IMAGE_DEFAULT_32)
@@ -371,8 +373,8 @@ LOCAL_PATH := art
 
 ART_TEST_MODULES := \
     art_cmdline_tests \
-    art_compiler_tests \
     art_compiler_host_tests \
+    art_compiler_tests \
     art_dex2oat_tests \
     art_dexanalyze_tests \
     art_dexdiag_tests \
@@ -383,12 +385,15 @@ ART_TEST_MODULES := \
     art_hiddenapi_tests \
     art_imgdiag_tests \
     art_libartbase_tests \
+    art_libartpalette_tests \
+    art_libdexfile_external_tests \
+    art_libdexfile_support_tests \
     art_libdexfile_tests \
     art_libprofile_tests \
     art_oatdump_tests \
     art_profman_tests \
-    art_runtime_tests \
     art_runtime_compiler_tests \
+    art_runtime_tests \
     art_sigchain_tests \
 
 ART_TARGET_GTEST_FILES := $(foreach m,$(ART_TEST_MODULES),\
@@ -422,6 +427,11 @@ ifneq ($(ART_TEST_ANDROID_ROOT),)
   ART_GTEST_TARGET_ANDROID_ROOT := $(ART_TEST_ANDROID_ROOT)
 endif
 
+ART_GTEST_TARGET_ANDROID_RUNTIME_ROOT := '/apex/com.android.runtime'
+ifneq ($(ART_TEST_ANDROID_RUNTIME_ROOT),)
+  ART_GTEST_TARGET_ANDROID_RUNTIME_ROOT := $(ART_TEST_ANDROID_RUNTIME_ROOT)
+endif
+
 # Define a make rule for a target device gtest.
 # $(1): gtest name - the name of the test we're building such as leb128_test.
 # $(2): path relative to $OUT to the test binary
@@ -450,9 +460,7 @@ define define-art-gtest-rule-target
     $$(gtest_exe) \
     $$($(3)TARGET_OUT_SHARED_LIBRARIES)/libjavacore.so \
     $$($(3)TARGET_OUT_SHARED_LIBRARIES)/libopenjdkd.so \
-    $$(TARGET_OUT_JAVA_LIBRARIES)/core-libart-testdex.jar \
-    $$(TARGET_OUT_JAVA_LIBRARIES)/core-oj-testdex.jar \
-    $$(TARGET_OUT_JAVA_LIBRARIES)/core-simple-testdex.jar
+    $$(foreach jar,$$(TARGET_TEST_CORE_JARS),$$(TARGET_OUT_JAVA_LIBRARIES)/$$(jar).jar)
 
   ART_TEST_TARGET_GTEST_DEPENDENCIES += $$(gtest_deps)
 
@@ -472,7 +480,9 @@ $$(gtest_rule): test-art-target-sync
 	$(hide) $(ADB) shell $$(PRIVATE_MAYBE_CHROOT_COMMAND) chmod 755 $$(PRIVATE_TARGET_EXE)
 	$(hide) $$(call ART_TEST_SKIP,$$@) && \
 	  ($(ADB) shell "$$(PRIVATE_MAYBE_CHROOT_COMMAND) env $(GCOV_ENV) LD_LIBRARY_PATH=$(4) \
-	       ANDROID_ROOT=$(ART_GTEST_TARGET_ANDROID_ROOT) $$(PRIVATE_TARGET_EXE) \
+	       ANDROID_ROOT=$(ART_GTEST_TARGET_ANDROID_ROOT) \
+	       ANDROID_RUNTIME_ROOT=$(ART_GTEST_TARGET_ANDROID_RUNTIME_ROOT) \
+	       $$(PRIVATE_TARGET_EXE) \
 	     && touch $$(PRIVATE_GTEST_WITNESS)" \
 	   && ($(ADB) pull $$(PRIVATE_GTEST_WITNESS) /tmp/ && $$(call ART_TEST_PASSED,$$@)) \
 	   || $$(call ART_TEST_FAILED,$$@))
@@ -508,7 +518,8 @@ define define-art-gtest-rule-host
     $$($(3)ART_HOST_OUT_SHARED_LIBRARIES)/libopenjdkd$$(ART_HOST_SHLIB_EXTENSION) \
     $$(gtest_exe) \
     $$(ART_GTEST_$(1)_HOST_DEPS) \
-    $(foreach file,$(ART_GTEST_$(1)_DEX_DEPS),$(ART_TEST_HOST_GTEST_$(file)_DEX))
+    $(foreach file,$(ART_GTEST_$(1)_DEX_DEPS),$(ART_TEST_HOST_GTEST_$(file)_DEX)) \
+    $(HOST_OUT_EXECUTABLES)/timeout_dumper
 
   ART_TEST_HOST_GTEST_DEPENDENCIES += $$(gtest_deps)
 
@@ -521,7 +532,9 @@ $$(gtest_output): .KATI_IMPLICIT_OUTPUTS := $$(gtest_output)-nocache
 $$(gtest_output): NAME := $$(gtest_rule)
 ifeq (,$(SANITIZE_HOST))
 $$(gtest_output): $$(gtest_exe) $$(gtest_deps)
-	$(hide) ($$(call ART_TEST_SKIP,$$(NAME)) && $$< --gtest_output=xml:$$@ && \
+	$(hide) ($$(call ART_TEST_SKIP,$$(NAME)) && \
+		timeout --foreground -k 120s -s SIGRTMIN+2 2400s $(HOST_OUT_EXECUTABLES)/timeout_dumper \
+			$$< --gtest_output=xml:$$@ && \
 		$$(call ART_TEST_PASSED,$$(NAME))) || $$(call ART_TEST_FAILED,$$(NAME))
 else
 # Note: envsetup currently exports ASAN_OPTIONS=detect_leaks=0 to suppress leak detection, as some
@@ -533,7 +546,9 @@ else
 # under ASAN.
 $$(gtest_output): $$(gtest_exe) $$(gtest_deps)
 	$(hide) ($$(call ART_TEST_SKIP,$$(NAME)) && set -o pipefail && \
-		ASAN_OPTIONS=detect_leaks=1 $$< --gtest_output=xml:$$@ 2>&1 | tee $$<.tmp.out >&2 && \
+		ASAN_OPTIONS=detect_leaks=1 timeout --foreground -k 120s -s SIGRTMIN+2 3600s \
+			$(HOST_OUT_EXECUTABLES)/timeout_dumper \
+				$$< --gtest_output=xml:$$@ 2>&1 | tee $$<.tmp.out >&2 && \
 		{ $$(call ART_TEST_PASSED,$$(NAME)) ; rm $$<.tmp.out ; }) || \
 		( grep -q AddressSanitizer $$<.tmp.out && export ANDROID_BUILD_TOP=`pwd` && \
 			{ echo "ABI: 'x86_64'" | cat - $$<.tmp.out | development/scripts/stack | tail -n 3000 ; } ; \
@@ -717,6 +732,7 @@ ART_TEST_TARGET_GTEST$(ART_PHONY_TEST_TARGET_SUFFIX)_RULES :=
 ART_TEST_TARGET_GTEST$(2ND_ART_PHONY_TEST_TARGET_SUFFIX)_RULES :=
 ART_TEST_TARGET_GTEST_RULES :=
 ART_GTEST_TARGET_ANDROID_ROOT :=
+ART_GTEST_TARGET_ANDROID_RUNTIME_ROOT :=
 ART_GTEST_class_linker_test_DEX_DEPS :=
 ART_GTEST_class_table_test_DEX_DEPS :=
 ART_GTEST_compiler_driver_test_DEX_DEPS :=

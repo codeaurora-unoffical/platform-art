@@ -26,6 +26,7 @@
 #include "class_linker-inl.h"
 #include "class_root.h"
 #include "dex/dex_file-inl.h"
+#include "dex/dex_instruction-inl.h"
 #include "jni/jni_internal.h"
 #include "jvalue-inl.h"
 #include "mirror/array-alloc-inl.h"
@@ -36,6 +37,7 @@
 #include "mirror/object_array-inl.h"
 #include "oat_file.h"
 #include "obj_ptr-inl.h"
+#include "quicken_info.h"
 #include "reflection.h"
 #include "thread.h"
 #include "well_known_classes.h"
@@ -43,6 +45,15 @@
 namespace art {
 
 using android::base::StringPrintf;
+
+using dex::AnnotationItem;
+using dex::AnnotationSetItem;
+using dex::AnnotationSetRefItem;
+using dex::AnnotationSetRefList;
+using dex::AnnotationsDirectoryItem;
+using dex::FieldAnnotationsItem;
+using dex::MethodAnnotationsItem;
+using dex::ParameterAnnotationsItem;
 
 struct DexFile::AnnotationValue {
   JValue value_;
@@ -75,7 +86,7 @@ class ClassData {
     return dex_file_;
   }
 
-  const DexFile::ClassDef* GetClassDef() const REQUIRES_SHARED(Locks::mutator_lock_) {
+  const dex::ClassDef* GetClassDef() const REQUIRES_SHARED(Locks::mutator_lock_) {
     return class_def_;
   }
 
@@ -107,7 +118,7 @@ class ClassData {
   ClassData(Handle<mirror::Class> klass,
             ArtMethod* method,
             const DexFile& dex_file,
-            const DexFile::ClassDef* class_def) REQUIRES_SHARED(Locks::mutator_lock_)
+            const dex::ClassDef* class_def) REQUIRES_SHARED(Locks::mutator_lock_)
       : real_klass_(klass),
         method_(method),
         dex_file_(dex_file),
@@ -118,7 +129,7 @@ class ClassData {
   Handle<mirror::Class> real_klass_;
   ArtMethod* method_;
   const DexFile& dex_file_;
-  const DexFile::ClassDef* class_def_;
+  const dex::ClassDef* class_def_;
 
   DISALLOW_COPY_AND_ASSIGN(ClassData);
 };
@@ -137,43 +148,46 @@ bool IsVisibilityCompatible(uint32_t actual, uint32_t expected) {
   return actual == expected;
 }
 
-const DexFile::AnnotationSetItem* FindAnnotationSetForField(ArtField* field)
+static const AnnotationSetItem* FindAnnotationSetForField(const DexFile& dex_file,
+                                                          const dex::ClassDef& class_def,
+                                                          uint32_t field_index)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  const DexFile* dex_file = field->GetDexFile();
-  ObjPtr<mirror::Class> klass = field->GetDeclaringClass();
-  const DexFile::ClassDef* class_def = klass->GetClassDef();
-  if (class_def == nullptr) {
-    DCHECK(klass->IsProxyClass());
-    return nullptr;
-  }
-  const DexFile::AnnotationsDirectoryItem* annotations_dir =
-      dex_file->GetAnnotationsDirectory(*class_def);
+  const AnnotationsDirectoryItem* annotations_dir = dex_file.GetAnnotationsDirectory(class_def);
   if (annotations_dir == nullptr) {
     return nullptr;
   }
-  const DexFile::FieldAnnotationsItem* field_annotations =
-      dex_file->GetFieldAnnotations(annotations_dir);
+  const FieldAnnotationsItem* field_annotations = dex_file.GetFieldAnnotations(annotations_dir);
   if (field_annotations == nullptr) {
     return nullptr;
   }
-  uint32_t field_index = field->GetDexFieldIndex();
   uint32_t field_count = annotations_dir->fields_size_;
   for (uint32_t i = 0; i < field_count; ++i) {
     if (field_annotations[i].field_idx_ == field_index) {
-      return dex_file->GetFieldAnnotationSetItem(field_annotations[i]);
+      return dex_file.GetFieldAnnotationSetItem(field_annotations[i]);
     }
   }
   return nullptr;
 }
 
-const DexFile::AnnotationItem* SearchAnnotationSet(const DexFile& dex_file,
-                                                   const DexFile::AnnotationSetItem* annotation_set,
-                                                   const char* descriptor,
-                                                   uint32_t visibility)
+static const AnnotationSetItem* FindAnnotationSetForField(ArtField* field)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  const DexFile::AnnotationItem* result = nullptr;
+  ObjPtr<mirror::Class> klass = field->GetDeclaringClass();
+  const dex::ClassDef* class_def = klass->GetClassDef();
+  if (class_def == nullptr) {
+    DCHECK(klass->IsProxyClass());
+    return nullptr;
+  }
+  return FindAnnotationSetForField(*field->GetDexFile(), *class_def, field->GetDexFieldIndex());
+}
+
+const AnnotationItem* SearchAnnotationSet(const DexFile& dex_file,
+                                          const AnnotationSetItem* annotation_set,
+                                          const char* descriptor,
+                                          uint32_t visibility)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  const AnnotationItem* result = nullptr;
   for (uint32_t i = 0; i < annotation_set->size_; ++i) {
-    const DexFile::AnnotationItem* annotation_item = dex_file.GetAnnotationItem(annotation_set, i);
+    const AnnotationItem* annotation_item = dex_file.GetAnnotationItem(annotation_set, i);
     if (!IsVisibilityCompatible(annotation_item->visibility_, visibility)) {
       continue;
     }
@@ -240,7 +254,7 @@ bool SkipAnnotationValue(const DexFile& dex_file, const uint8_t** annotation_ptr
       break;
     default:
       LOG(FATAL) << StringPrintf("Bad annotation element value byte 0x%02x", value_type);
-      return false;
+      UNREACHABLE();
   }
 
   annotation += width;
@@ -268,16 +282,14 @@ const uint8_t* SearchEncodedAnnotation(const DexFile& dex_file,
   return nullptr;
 }
 
-const DexFile::AnnotationSetItem* FindAnnotationSetForMethod(const DexFile& dex_file,
-                                                             const DexFile::ClassDef& class_def,
-                                                             uint32_t method_index) {
-  const DexFile::AnnotationsDirectoryItem* annotations_dir =
-      dex_file.GetAnnotationsDirectory(class_def);
+static const AnnotationSetItem* FindAnnotationSetForMethod(const DexFile& dex_file,
+                                                           const dex::ClassDef& class_def,
+                                                           uint32_t method_index) {
+  const AnnotationsDirectoryItem* annotations_dir = dex_file.GetAnnotationsDirectory(class_def);
   if (annotations_dir == nullptr) {
     return nullptr;
   }
-  const DexFile::MethodAnnotationsItem* method_annotations =
-      dex_file.GetMethodAnnotations(annotations_dir);
+  const MethodAnnotationsItem* method_annotations = dex_file.GetMethodAnnotations(annotations_dir);
   if (method_annotations == nullptr) {
     return nullptr;
   }
@@ -290,7 +302,7 @@ const DexFile::AnnotationSetItem* FindAnnotationSetForMethod(const DexFile& dex_
   return nullptr;
 }
 
-inline const DexFile::AnnotationSetItem* FindAnnotationSetForMethod(ArtMethod* method)
+inline const AnnotationSetItem* FindAnnotationSetForMethod(ArtMethod* method)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   if (method->IsProxyMethod()) {
     return nullptr;
@@ -300,15 +312,15 @@ inline const DexFile::AnnotationSetItem* FindAnnotationSetForMethod(ArtMethod* m
                                     method->GetDexMethodIndex());
 }
 
-const DexFile::ParameterAnnotationsItem* FindAnnotationsItemForMethod(ArtMethod* method)
+const ParameterAnnotationsItem* FindAnnotationsItemForMethod(ArtMethod* method)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   const DexFile* dex_file = method->GetDexFile();
-  const DexFile::AnnotationsDirectoryItem* annotations_dir =
+  const AnnotationsDirectoryItem* annotations_dir =
       dex_file->GetAnnotationsDirectory(method->GetClassDef());
   if (annotations_dir == nullptr) {
     return nullptr;
   }
-  const DexFile::ParameterAnnotationsItem* parameter_annotations =
+  const ParameterAnnotationsItem* parameter_annotations =
       dex_file->GetParameterAnnotations(annotations_dir);
   if (parameter_annotations == nullptr) {
     return nullptr;
@@ -323,16 +335,15 @@ const DexFile::ParameterAnnotationsItem* FindAnnotationsItemForMethod(ArtMethod*
   return nullptr;
 }
 
-const DexFile::AnnotationSetItem* FindAnnotationSetForClass(const ClassData& klass)
+static const AnnotationSetItem* FindAnnotationSetForClass(const ClassData& klass)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   const DexFile& dex_file = klass.GetDexFile();
-  const DexFile::ClassDef* class_def = klass.GetClassDef();
+  const dex::ClassDef* class_def = klass.GetClassDef();
   if (class_def == nullptr) {
     DCHECK(klass.GetRealClass()->IsProxyClass());
     return nullptr;
   }
-  const DexFile::AnnotationsDirectoryItem* annotations_dir =
-      dex_file.GetAnnotationsDirectory(*class_def);
+  const AnnotationsDirectoryItem* annotations_dir = dex_file.GetAnnotationsDirectory(*class_def);
   if (annotations_dir == nullptr) {
     return nullptr;
   }
@@ -768,15 +779,14 @@ ObjPtr<mirror::Object> CreateAnnotationMember(const ClassData& klass,
   return new_member.Get();
 }
 
-const DexFile::AnnotationItem* GetAnnotationItemFromAnnotationSet(
-    const ClassData& klass,
-    const DexFile::AnnotationSetItem* annotation_set,
-    uint32_t visibility,
-    Handle<mirror::Class> annotation_class)
+const AnnotationItem* GetAnnotationItemFromAnnotationSet(const ClassData& klass,
+                                                         const AnnotationSetItem* annotation_set,
+                                                         uint32_t visibility,
+                                                         Handle<mirror::Class> annotation_class)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   const DexFile& dex_file = klass.GetDexFile();
   for (uint32_t i = 0; i < annotation_set->size_; ++i) {
-    const DexFile::AnnotationItem* annotation_item = dex_file.GetAnnotationItem(annotation_set, i);
+    const AnnotationItem* annotation_item = dex_file.GetAnnotationItem(annotation_set, i);
     if (!IsVisibilityCompatible(annotation_item->visibility_, visibility)) {
       continue;
     }
@@ -805,13 +815,12 @@ const DexFile::AnnotationItem* GetAnnotationItemFromAnnotationSet(
   return nullptr;
 }
 
-ObjPtr<mirror::Object> GetAnnotationObjectFromAnnotationSet(
-    const ClassData& klass,
-    const DexFile::AnnotationSetItem* annotation_set,
-    uint32_t visibility,
-    Handle<mirror::Class> annotation_class)
+ObjPtr<mirror::Object> GetAnnotationObjectFromAnnotationSet(const ClassData& klass,
+                                                            const AnnotationSetItem* annotation_set,
+                                                            uint32_t visibility,
+                                                            Handle<mirror::Class> annotation_class)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  const DexFile::AnnotationItem* annotation_item = GetAnnotationItemFromAnnotationSet(
+  const AnnotationItem* annotation_item = GetAnnotationItemFromAnnotationSet(
       klass, annotation_set, visibility, annotation_class);
   if (annotation_item == nullptr) {
     return nullptr;
@@ -821,7 +830,7 @@ ObjPtr<mirror::Object> GetAnnotationObjectFromAnnotationSet(
 }
 
 ObjPtr<mirror::Object> GetAnnotationValue(const ClassData& klass,
-                                          const DexFile::AnnotationItem* annotation_item,
+                                          const AnnotationItem* annotation_item,
                                           const char* annotation_name,
                                           Handle<mirror::Class> array_class,
                                           uint32_t expected_type)
@@ -855,11 +864,11 @@ ObjPtr<mirror::Object> GetAnnotationValue(const ClassData& klass,
 
 static ObjPtr<mirror::ObjectArray<mirror::String>> GetSignatureValue(
     const ClassData& klass,
-    const DexFile::AnnotationSetItem* annotation_set)
+    const AnnotationSetItem* annotation_set)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   const DexFile& dex_file = klass.GetDexFile();
   StackHandleScope<1> hs(Thread::Current());
-  const DexFile::AnnotationItem* annotation_item =
+  const AnnotationItem* annotation_item =
       SearchAnnotationSet(dex_file, annotation_set, "Ldalvik/annotation/Signature;",
                           DexFile::kDexVisibilitySystem);
   if (annotation_item == nullptr) {
@@ -877,12 +886,11 @@ static ObjPtr<mirror::ObjectArray<mirror::String>> GetSignatureValue(
   return obj->AsObjectArray<mirror::String>();
 }
 
-ObjPtr<mirror::ObjectArray<mirror::Class>> GetThrowsValue(
-    const ClassData& klass,
-    const DexFile::AnnotationSetItem* annotation_set)
+ObjPtr<mirror::ObjectArray<mirror::Class>> GetThrowsValue(const ClassData& klass,
+                                                          const AnnotationSetItem* annotation_set)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   const DexFile& dex_file = klass.GetDexFile();
-  const DexFile::AnnotationItem* annotation_item =
+  const AnnotationItem* annotation_item =
       SearchAnnotationSet(dex_file, annotation_set, "Ldalvik/annotation/Throws;",
                           DexFile::kDexVisibilitySystem);
   if (annotation_item == nullptr) {
@@ -903,7 +911,7 @@ ObjPtr<mirror::ObjectArray<mirror::Class>> GetThrowsValue(
 
 ObjPtr<mirror::ObjectArray<mirror::Object>> ProcessAnnotationSet(
     const ClassData& klass,
-    const DexFile::AnnotationSetItem* annotation_set,
+    const AnnotationSetItem* annotation_set,
     uint32_t visibility)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   const DexFile& dex_file = klass.GetDexFile();
@@ -925,7 +933,7 @@ ObjPtr<mirror::ObjectArray<mirror::Object>> ProcessAnnotationSet(
 
   uint32_t dest_index = 0;
   for (uint32_t i = 0; i < size; ++i) {
-    const DexFile::AnnotationItem* annotation_item = dex_file.GetAnnotationItem(annotation_set, i);
+    const AnnotationItem* annotation_item = dex_file.GetAnnotationItem(annotation_set, i);
     // Note that we do not use IsVisibilityCompatible here because older code
     // was correct for this case.
     if (annotation_item->visibility_ != visibility) {
@@ -961,7 +969,7 @@ ObjPtr<mirror::ObjectArray<mirror::Object>> ProcessAnnotationSet(
 
 ObjPtr<mirror::ObjectArray<mirror::Object>> ProcessAnnotationSetRefList(
     const ClassData& klass,
-    const DexFile::AnnotationSetRefList* set_ref_list,
+    const AnnotationSetRefList* set_ref_list,
     uint32_t size)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   const DexFile& dex_file = klass.GetDexFile();
@@ -982,8 +990,8 @@ ObjPtr<mirror::ObjectArray<mirror::Object>> ProcessAnnotationSetRefList(
     return nullptr;
   }
   for (uint32_t index = 0; index < size; ++index) {
-    const DexFile::AnnotationSetRefItem* set_ref_item = &set_ref_list->list_[index];
-    const DexFile::AnnotationSetItem* set_item = dex_file.GetSetRefItemItem(set_ref_item);
+    const AnnotationSetRefItem* set_ref_item = &set_ref_list->list_[index];
+    const AnnotationSetItem* set_item = dex_file.GetSetRefItemItem(set_ref_item);
     ObjPtr<mirror::Object> annotation_set = ProcessAnnotationSet(klass,
                                                                  set_item,
                                                                  DexFile::kDexVisibilityRuntime);
@@ -1000,7 +1008,7 @@ namespace annotations {
 
 ObjPtr<mirror::Object> GetAnnotationForField(ArtField* field,
                                              Handle<mirror::Class> annotation_class) {
-  const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForField(field);
+  const AnnotationSetItem* annotation_set = FindAnnotationSetForField(field);
   if (annotation_set == nullptr) {
     return nullptr;
   }
@@ -1013,14 +1021,14 @@ ObjPtr<mirror::Object> GetAnnotationForField(ArtField* field,
 }
 
 ObjPtr<mirror::ObjectArray<mirror::Object>> GetAnnotationsForField(ArtField* field) {
-  const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForField(field);
+  const AnnotationSetItem* annotation_set = FindAnnotationSetForField(field);
   StackHandleScope<1> hs(Thread::Current());
   const ClassData field_class(hs, field);
   return ProcessAnnotationSet(field_class, annotation_set, DexFile::kDexVisibilityRuntime);
 }
 
 ObjPtr<mirror::ObjectArray<mirror::String>> GetSignatureAnnotationForField(ArtField* field) {
-  const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForField(field);
+  const AnnotationSetItem* annotation_set = FindAnnotationSetForField(field);
   if (annotation_set == nullptr) {
     return nullptr;
   }
@@ -1030,13 +1038,13 @@ ObjPtr<mirror::ObjectArray<mirror::String>> GetSignatureAnnotationForField(ArtFi
 }
 
 bool IsFieldAnnotationPresent(ArtField* field, Handle<mirror::Class> annotation_class) {
-  const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForField(field);
+  const AnnotationSetItem* annotation_set = FindAnnotationSetForField(field);
   if (annotation_set == nullptr) {
     return false;
   }
   StackHandleScope<1> hs(Thread::Current());
   const ClassData field_class(hs, field);
-  const DexFile::AnnotationItem* annotation_item = GetAnnotationItemFromAnnotationSet(
+  const AnnotationItem* annotation_item = GetAnnotationItemFromAnnotationSet(
       field_class, annotation_set, DexFile::kDexVisibilityRuntime, annotation_class);
   return annotation_item != nullptr;
 }
@@ -1044,17 +1052,17 @@ bool IsFieldAnnotationPresent(ArtField* field, Handle<mirror::Class> annotation_
 ObjPtr<mirror::Object> GetAnnotationDefaultValue(ArtMethod* method) {
   const ClassData klass(method);
   const DexFile* dex_file = &klass.GetDexFile();
-  const DexFile::AnnotationsDirectoryItem* annotations_dir =
+  const AnnotationsDirectoryItem* annotations_dir =
       dex_file->GetAnnotationsDirectory(*klass.GetClassDef());
   if (annotations_dir == nullptr) {
     return nullptr;
   }
-  const DexFile::AnnotationSetItem* annotation_set =
+  const AnnotationSetItem* annotation_set =
       dex_file->GetClassAnnotationSet(annotations_dir);
   if (annotation_set == nullptr) {
     return nullptr;
   }
-  const DexFile::AnnotationItem* annotation_item = SearchAnnotationSet(*dex_file, annotation_set,
+  const AnnotationItem* annotation_item = SearchAnnotationSet(*dex_file, annotation_set,
       "Ldalvik/annotation/AnnotationDefault;", DexFile::kDexVisibilitySystem);
   if (annotation_item == nullptr) {
     return nullptr;
@@ -1087,7 +1095,7 @@ ObjPtr<mirror::Object> GetAnnotationDefaultValue(ArtMethod* method) {
 
 ObjPtr<mirror::Object> GetAnnotationForMethod(ArtMethod* method,
                                               Handle<mirror::Class> annotation_class) {
-  const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForMethod(method);
+  const AnnotationSetItem* annotation_set = FindAnnotationSetForMethod(method);
   if (annotation_set == nullptr) {
     return nullptr;
   }
@@ -1096,14 +1104,14 @@ ObjPtr<mirror::Object> GetAnnotationForMethod(ArtMethod* method,
 }
 
 ObjPtr<mirror::ObjectArray<mirror::Object>> GetAnnotationsForMethod(ArtMethod* method) {
-  const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForMethod(method);
+  const AnnotationSetItem* annotation_set = FindAnnotationSetForMethod(method);
   return ProcessAnnotationSet(ClassData(method),
                               annotation_set,
                               DexFile::kDexVisibilityRuntime);
 }
 
 ObjPtr<mirror::ObjectArray<mirror::Class>> GetExceptionTypesForMethod(ArtMethod* method) {
-  const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForMethod(method);
+  const AnnotationSetItem* annotation_set = FindAnnotationSetForMethod(method);
   if (annotation_set == nullptr) {
     return nullptr;
   }
@@ -1112,12 +1120,12 @@ ObjPtr<mirror::ObjectArray<mirror::Class>> GetExceptionTypesForMethod(ArtMethod*
 
 ObjPtr<mirror::ObjectArray<mirror::Object>> GetParameterAnnotations(ArtMethod* method) {
   const DexFile* dex_file = method->GetDexFile();
-  const DexFile::ParameterAnnotationsItem* parameter_annotations =
+  const ParameterAnnotationsItem* parameter_annotations =
       FindAnnotationsItemForMethod(method);
   if (parameter_annotations == nullptr) {
     return nullptr;
   }
-  const DexFile::AnnotationSetRefList* set_ref_list =
+  const AnnotationSetRefList* set_ref_list =
       dex_file->GetParameterAnnotationSetRefList(parameter_annotations);
   if (set_ref_list == nullptr) {
     return nullptr;
@@ -1128,12 +1136,12 @@ ObjPtr<mirror::ObjectArray<mirror::Object>> GetParameterAnnotations(ArtMethod* m
 
 uint32_t GetNumberOfAnnotatedMethodParameters(ArtMethod* method) {
   const DexFile* dex_file = method->GetDexFile();
-  const DexFile::ParameterAnnotationsItem* parameter_annotations =
+  const ParameterAnnotationsItem* parameter_annotations =
       FindAnnotationsItemForMethod(method);
   if (parameter_annotations == nullptr) {
     return 0u;
   }
-  const DexFile::AnnotationSetRefList* set_ref_list =
+  const AnnotationSetRefList* set_ref_list =
       dex_file->GetParameterAnnotationSetRefList(parameter_annotations);
   if (set_ref_list == nullptr) {
     return 0u;
@@ -1145,12 +1153,11 @@ ObjPtr<mirror::Object> GetAnnotationForMethodParameter(ArtMethod* method,
                                                        uint32_t parameter_idx,
                                                        Handle<mirror::Class> annotation_class) {
   const DexFile* dex_file = method->GetDexFile();
-  const DexFile::ParameterAnnotationsItem* parameter_annotations =
-      FindAnnotationsItemForMethod(method);
+  const ParameterAnnotationsItem* parameter_annotations = FindAnnotationsItemForMethod(method);
   if (parameter_annotations == nullptr) {
     return nullptr;
   }
-  const DexFile::AnnotationSetRefList* set_ref_list =
+  const AnnotationSetRefList* set_ref_list =
       dex_file->GetParameterAnnotationSetRefList(parameter_annotations);
   if (set_ref_list == nullptr) {
     return nullptr;
@@ -1158,8 +1165,8 @@ ObjPtr<mirror::Object> GetAnnotationForMethodParameter(ArtMethod* method,
   if (parameter_idx >= set_ref_list->size_) {
     return nullptr;
   }
-  const DexFile::AnnotationSetRefItem* annotation_set_ref = &set_ref_list->list_[parameter_idx];
-  const DexFile::AnnotationSetItem* annotation_set =
+  const AnnotationSetRefItem* annotation_set_ref = &set_ref_list->list_[parameter_idx];
+  const AnnotationSetItem* annotation_set =
      dex_file->GetSetRefItemItem(annotation_set_ref);
   if (annotation_set == nullptr) {
     return nullptr;
@@ -1174,14 +1181,14 @@ bool GetParametersMetadataForMethod(
     ArtMethod* method,
     /*out*/ MutableHandle<mirror::ObjectArray<mirror::String>>* names,
     /*out*/ MutableHandle<mirror::IntArray>* access_flags) {
-  const DexFile::AnnotationSetItem* annotation_set =
+  const AnnotationSetItem* annotation_set =
       FindAnnotationSetForMethod(method);
   if (annotation_set == nullptr) {
     return false;
   }
 
   const DexFile* dex_file = method->GetDexFile();
-  const DexFile::AnnotationItem* annotation_item =
+  const AnnotationItem* annotation_item =
       SearchAnnotationSet(*dex_file,
                           annotation_set,
                           "Ldalvik/annotation/MethodParameters;",
@@ -1228,7 +1235,7 @@ bool GetParametersMetadataForMethod(
 }
 
 ObjPtr<mirror::ObjectArray<mirror::String>> GetSignatureAnnotationForMethod(ArtMethod* method) {
-  const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForMethod(method);
+  const AnnotationSetItem* annotation_set = FindAnnotationSetForMethod(method);
   if (annotation_set == nullptr) {
     return nullptr;
   }
@@ -1238,11 +1245,11 @@ ObjPtr<mirror::ObjectArray<mirror::String>> GetSignatureAnnotationForMethod(ArtM
 bool IsMethodAnnotationPresent(ArtMethod* method,
                                Handle<mirror::Class> annotation_class,
                                uint32_t visibility /* = DexFile::kDexVisibilityRuntime */) {
-  const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForMethod(method);
+  const AnnotationSetItem* annotation_set = FindAnnotationSetForMethod(method);
   if (annotation_set == nullptr) {
     return false;
   }
-  const DexFile::AnnotationItem* annotation_item = GetAnnotationItemFromAnnotationSet(
+  const AnnotationItem* annotation_item = GetAnnotationItemFromAnnotationSet(
       ClassData(method), annotation_set, visibility, annotation_class);
   return annotation_item != nullptr;
 }
@@ -1263,11 +1270,11 @@ static void DCheckNativeAnnotation(const char* descriptor, jclass cls) {
 // Check whether a method from the `dex_file` with the given `annotation_set`
 // is annotated with `annotation_descriptor` with build visibility.
 static bool IsMethodBuildAnnotationPresent(const DexFile& dex_file,
-                                           const DexFile::AnnotationSetItem& annotation_set,
+                                           const AnnotationSetItem& annotation_set,
                                            const char* annotation_descriptor,
                                            jclass annotation_class) {
   for (uint32_t i = 0; i < annotation_set.size_; ++i) {
-    const DexFile::AnnotationItem* annotation_item = dex_file.GetAnnotationItem(&annotation_set, i);
+    const AnnotationItem* annotation_item = dex_file.GetAnnotationItem(&annotation_set, i);
     if (!IsVisibilityCompatible(annotation_item->visibility_, DexFile::kDexVisibilityBuild)) {
       continue;
     }
@@ -1283,9 +1290,9 @@ static bool IsMethodBuildAnnotationPresent(const DexFile& dex_file,
 }
 
 uint32_t GetNativeMethodAnnotationAccessFlags(const DexFile& dex_file,
-                                              const DexFile::ClassDef& class_def,
+                                              const dex::ClassDef& class_def,
                                               uint32_t method_index) {
-  const DexFile::AnnotationSetItem* annotation_set =
+  const dex::AnnotationSetItem* annotation_set =
       FindAnnotationSetForMethod(dex_file, class_def, method_index);
   if (annotation_set == nullptr) {
     return 0u;
@@ -1309,10 +1316,195 @@ uint32_t GetNativeMethodAnnotationAccessFlags(const DexFile& dex_file,
   return access_flags;
 }
 
+bool FieldIsReachabilitySensitive(const DexFile& dex_file,
+                                  const dex::ClassDef& class_def,
+                                  uint32_t field_index)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  const AnnotationSetItem* annotation_set =
+      FindAnnotationSetForField(dex_file, class_def, field_index);
+  if (annotation_set == nullptr) {
+    return false;
+  }
+  const AnnotationItem* annotation_item = SearchAnnotationSet(dex_file, annotation_set,
+      "Ldalvik/annotation/optimization/ReachabilitySensitive;", DexFile::kDexVisibilityRuntime);
+  // TODO: We're missing the equivalent of DCheckNativeAnnotation (not a DCHECK). Does it matter?
+  return annotation_item != nullptr;
+}
+
+bool MethodIsReachabilitySensitive(const DexFile& dex_file,
+                                   const dex::ClassDef& class_def,
+                                   uint32_t method_index)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  const AnnotationSetItem* annotation_set =
+      FindAnnotationSetForMethod(dex_file, class_def, method_index);
+  if (annotation_set == nullptr) {
+    return false;
+  }
+  const AnnotationItem* annotation_item = SearchAnnotationSet(dex_file, annotation_set,
+      "Ldalvik/annotation/optimization/ReachabilitySensitive;", DexFile::kDexVisibilityRuntime);
+  return annotation_item != nullptr;
+}
+
+static bool MethodIsReachabilitySensitive(const DexFile& dex_file,
+                                               uint32_t method_index)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  DCHECK(method_index < dex_file.NumMethodIds());
+  const dex::MethodId& method_id = dex_file.GetMethodId(method_index);
+  dex::TypeIndex class_index = method_id.class_idx_;
+  const dex::ClassDef * class_def = dex_file.FindClassDef(class_index);
+  return class_def != nullptr
+         && MethodIsReachabilitySensitive(dex_file, *class_def, method_index);
+}
+
+bool MethodContainsRSensitiveAccess(const DexFile& dex_file,
+                                    const dex::ClassDef& class_def,
+                                    uint32_t method_index)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  // TODO: This is too slow to run very regularly. Currently this is only invoked in the
+  // presence of @DeadReferenceSafe, which will be rare. In the long run, we need to quickly
+  // check once whether a class has any @ReachabilitySensitive annotations. If not, we can
+  // immediately return false here for any method in that class.
+  uint32_t code_item_offset = dex_file.FindCodeItemOffset(class_def, method_index);
+  const dex::CodeItem* code_item = dex_file.GetCodeItem(code_item_offset);
+  CodeItemInstructionAccessor accessor(dex_file, code_item);
+  if (!accessor.HasCodeItem()) {
+    return false;
+  }
+  ArrayRef<const uint8_t> quicken_data;
+  const OatDexFile* oat_dex_file = dex_file.GetOatDexFile();
+  if (oat_dex_file != nullptr) {
+    quicken_data = oat_dex_file->GetQuickenedInfoOf(dex_file, method_index);
+  }
+  const QuickenInfoTable quicken_info(quicken_data);
+  uint32_t quicken_index = 0;
+  for (DexInstructionIterator iter = accessor.begin(); iter != accessor.end(); ++iter) {
+    switch (iter->Opcode()) {
+      case Instruction::IGET:
+      case Instruction::IGET_QUICK:
+      case Instruction::IGET_WIDE:
+      case Instruction::IGET_WIDE_QUICK:
+      case Instruction::IGET_OBJECT:
+      case Instruction::IGET_OBJECT_QUICK:
+      case Instruction::IGET_BOOLEAN:
+      case Instruction::IGET_BOOLEAN_QUICK:
+      case Instruction::IGET_BYTE:
+      case Instruction::IGET_BYTE_QUICK:
+      case Instruction::IGET_CHAR:
+      case Instruction::IGET_CHAR_QUICK:
+      case Instruction::IGET_SHORT:
+      case Instruction::IGET_SHORT_QUICK:
+      case Instruction::IPUT:
+      case Instruction::IPUT_QUICK:
+      case Instruction::IPUT_WIDE:
+      case Instruction::IPUT_WIDE_QUICK:
+      case Instruction::IPUT_OBJECT:
+      case Instruction::IPUT_OBJECT_QUICK:
+      case Instruction::IPUT_BOOLEAN:
+      case Instruction::IPUT_BOOLEAN_QUICK:
+      case Instruction::IPUT_BYTE:
+      case Instruction::IPUT_BYTE_QUICK:
+      case Instruction::IPUT_CHAR:
+      case Instruction::IPUT_CHAR_QUICK:
+      case Instruction::IPUT_SHORT:
+      case Instruction::IPUT_SHORT_QUICK:
+        {
+          uint32_t field_index;
+          if (iter->IsQuickened()) {
+            field_index = quicken_info.GetData(quicken_index);
+          } else {
+            field_index = iter->VRegC_22c();
+          }
+          DCHECK(field_index < dex_file.NumFieldIds());
+          // We only guarantee to pay attention to the annotation if it's in the same class,
+          // or a containing class, but it's OK to do so in other cases.
+          const dex::FieldId& field_id = dex_file.GetFieldId(field_index);
+          dex::TypeIndex class_index = field_id.class_idx_;
+          const dex::ClassDef * field_class_def = dex_file.FindClassDef(class_index);
+          // We do not handle the case in which the field is declared in a superclass, and
+          // don't claim to do so. The annotated field should normally be private.
+          if (field_class_def != nullptr
+              && FieldIsReachabilitySensitive(dex_file, *field_class_def, field_index)) {
+            return true;
+          }
+        }
+        break;
+      case Instruction::INVOKE_SUPER:
+        // Cannot call method in same class. TODO: Try an explicit superclass lookup for
+        // better "best effort"?
+        break;
+      case Instruction::INVOKE_INTERFACE:
+        // We handle an interface call just like a virtual call. We will find annotations
+        // on interface methods/fields visible to us, but not of the annotation is in a
+        // super-interface. Again, we could just ignore it.
+      case Instruction::INVOKE_VIRTUAL:
+      case Instruction::INVOKE_DIRECT:
+        {
+          uint32_t called_method_index = iter->VRegB_35c();
+          if (MethodIsReachabilitySensitive(dex_file, called_method_index)) {
+            return true;
+          }
+        }
+        break;
+      case Instruction::INVOKE_INTERFACE_RANGE:
+      case Instruction::INVOKE_VIRTUAL_RANGE:
+      case Instruction::INVOKE_DIRECT_RANGE:
+        {
+          uint32_t called_method_index = iter->VRegB_3rc();
+          if (MethodIsReachabilitySensitive(dex_file, called_method_index)) {
+            return true;
+          }
+        }
+        break;
+      case Instruction::INVOKE_VIRTUAL_QUICK:
+      case Instruction::INVOKE_VIRTUAL_RANGE_QUICK:
+        {
+          uint32_t called_method_index = quicken_info.GetData(quicken_index);
+          if (MethodIsReachabilitySensitive(dex_file, called_method_index)) {
+            return true;
+          }
+        }
+        break;
+        // We explicitly do not handle indirect ReachabilitySensitive accesses through VarHandles,
+        // etc. Thus we ignore INVOKE_CUSTOM / INVOKE_CUSTOM_RANGE / INVOKE_POLYMORPHIC /
+        // INVOKE_POLYMORPHIC_RANGE.
+      default:
+        // There is no way to add an annotation to array elements, and so far we've encountered no
+        // need for that, so we ignore AGET and APUT.
+        // It's impractical or impossible to garbage collect a class while one of its methods is
+        // on the call stack. We allow ReachabilitySensitive annotations on static methods and
+        // fields, but they can be safely ignored.
+        break;
+    }
+    if (QuickenInfoTable::NeedsIndexForInstruction(&iter.Inst())) {
+      ++quicken_index;
+    }
+  }
+  return false;
+}
+
+bool HasDeadReferenceSafeAnnotation(const DexFile& dex_file,
+                                    const dex::ClassDef& class_def)
+  // TODO: This should check outer classes as well.
+  // It's conservatively correct not to do so.
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  const AnnotationsDirectoryItem* annotations_dir =
+      dex_file.GetAnnotationsDirectory(class_def);
+  if (annotations_dir == nullptr) {
+    return false;
+  }
+  const AnnotationSetItem* annotation_set = dex_file.GetClassAnnotationSet(annotations_dir);
+  if (annotation_set == nullptr) {
+    return false;
+  }
+  const AnnotationItem* annotation_item = SearchAnnotationSet(dex_file, annotation_set,
+      "Ldalvik/annotation/optimization/DeadReferenceSafe;", DexFile::kDexVisibilityRuntime);
+  return annotation_item != nullptr;
+}
+
 ObjPtr<mirror::Object> GetAnnotationForClass(Handle<mirror::Class> klass,
                                              Handle<mirror::Class> annotation_class) {
   ClassData data(klass);
-  const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
+  const AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
   if (annotation_set == nullptr) {
     return nullptr;
   }
@@ -1324,17 +1516,17 @@ ObjPtr<mirror::Object> GetAnnotationForClass(Handle<mirror::Class> klass,
 
 ObjPtr<mirror::ObjectArray<mirror::Object>> GetAnnotationsForClass(Handle<mirror::Class> klass) {
   ClassData data(klass);
-  const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
+  const AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
   return ProcessAnnotationSet(data, annotation_set, DexFile::kDexVisibilityRuntime);
 }
 
 ObjPtr<mirror::ObjectArray<mirror::Class>> GetDeclaredClasses(Handle<mirror::Class> klass) {
   ClassData data(klass);
-  const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
+  const AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
   if (annotation_set == nullptr) {
     return nullptr;
   }
-  const DexFile::AnnotationItem* annotation_item =
+  const AnnotationItem* annotation_item =
       SearchAnnotationSet(data.GetDexFile(), annotation_set, "Ldalvik/annotation/MemberClasses;",
                           DexFile::kDexVisibilitySystem);
   if (annotation_item == nullptr) {
@@ -1355,11 +1547,11 @@ ObjPtr<mirror::ObjectArray<mirror::Class>> GetDeclaredClasses(Handle<mirror::Cla
 
 ObjPtr<mirror::Class> GetDeclaringClass(Handle<mirror::Class> klass) {
   ClassData data(klass);
-  const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
+  const AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
   if (annotation_set == nullptr) {
     return nullptr;
   }
-  const DexFile::AnnotationItem* annotation_item =
+  const AnnotationItem* annotation_item =
       SearchAnnotationSet(data.GetDexFile(), annotation_set, "Ldalvik/annotation/EnclosingClass;",
                           DexFile::kDexVisibilitySystem);
   if (annotation_item == nullptr) {
@@ -1382,11 +1574,11 @@ ObjPtr<mirror::Class> GetEnclosingClass(Handle<mirror::Class> klass) {
     return declaring_class;
   }
   ClassData data(klass);
-  const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
+  const AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
   if (annotation_set == nullptr) {
     return nullptr;
   }
-  const DexFile::AnnotationItem* annotation_item =
+  const AnnotationItem* annotation_item =
       SearchAnnotationSet(data.GetDexFile(),
                           annotation_set,
                           "Ldalvik/annotation/EnclosingMethod;",
@@ -1423,11 +1615,11 @@ ObjPtr<mirror::Class> GetEnclosingClass(Handle<mirror::Class> klass) {
 
 ObjPtr<mirror::Object> GetEnclosingMethod(Handle<mirror::Class> klass) {
   ClassData data(klass);
-  const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
+  const AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
   if (annotation_set == nullptr) {
     return nullptr;
   }
-  const DexFile::AnnotationItem* annotation_item =
+  const AnnotationItem* annotation_item =
       SearchAnnotationSet(data.GetDexFile(),
                           annotation_set,
                           "Ldalvik/annotation/EnclosingMethod;",
@@ -1441,11 +1633,11 @@ ObjPtr<mirror::Object> GetEnclosingMethod(Handle<mirror::Class> klass) {
 
 bool GetInnerClass(Handle<mirror::Class> klass, /*out*/ ObjPtr<mirror::String>* name) {
   ClassData data(klass);
-  const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
+  const AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
   if (annotation_set == nullptr) {
     return false;
   }
-  const DexFile::AnnotationItem* annotation_item = SearchAnnotationSet(
+  const AnnotationItem* annotation_item = SearchAnnotationSet(
       data.GetDexFile(),
       annotation_set,
       "Ldalvik/annotation/InnerClass;",
@@ -1476,11 +1668,11 @@ bool GetInnerClass(Handle<mirror::Class> klass, /*out*/ ObjPtr<mirror::String>* 
 
 bool GetInnerClassFlags(Handle<mirror::Class> klass, uint32_t* flags) {
   ClassData data(klass);
-  const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
+  const AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
   if (annotation_set == nullptr) {
     return false;
   }
-  const DexFile::AnnotationItem* annotation_item =
+  const AnnotationItem* annotation_item =
       SearchAnnotationSet(data.GetDexFile(), annotation_set, "Ldalvik/annotation/InnerClass;",
                           DexFile::kDexVisibilitySystem);
   if (annotation_item == nullptr) {
@@ -1509,7 +1701,7 @@ bool GetInnerClassFlags(Handle<mirror::Class> klass, uint32_t* flags) {
 ObjPtr<mirror::ObjectArray<mirror::String>> GetSignatureAnnotationForClass(
     Handle<mirror::Class> klass) {
   ClassData data(klass);
-  const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
+  const AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
   if (annotation_set == nullptr) {
     return nullptr;
   }
@@ -1526,12 +1718,12 @@ const char* GetSourceDebugExtension(Handle<mirror::Class> klass) {
   }
 
   ClassData data(klass);
-  const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
+  const AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
   if (annotation_set == nullptr) {
     return nullptr;
   }
 
-  const DexFile::AnnotationItem* annotation_item = SearchAnnotationSet(
+  const AnnotationItem* annotation_item = SearchAnnotationSet(
       data.GetDexFile(),
       annotation_set,
       "Ldalvik/annotation/SourceDebugExtension;",
@@ -1562,11 +1754,11 @@ const char* GetSourceDebugExtension(Handle<mirror::Class> klass) {
 
 bool IsClassAnnotationPresent(Handle<mirror::Class> klass, Handle<mirror::Class> annotation_class) {
   ClassData data(klass);
-  const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
+  const AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
   if (annotation_set == nullptr) {
     return false;
   }
-  const DexFile::AnnotationItem* annotation_item = GetAnnotationItemFromAnnotationSet(
+  const AnnotationItem* annotation_item = GetAnnotationItemFromAnnotationSet(
       data, annotation_set, DexFile::kDexVisibilityRuntime, annotation_class);
   return annotation_item != nullptr;
 }

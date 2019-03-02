@@ -16,7 +16,6 @@
 
 #include "art_dex_file_loader.h"
 
-#include <sys/mman.h>  // For the PROT_* and MAP_* constants.
 #include <sys/stat.h>
 
 #include "android-base/stringprintf.h"
@@ -24,6 +23,7 @@
 #include "base/file_magic.h"
 #include "base/file_utils.h"
 #include "base/mem_map.h"
+#include "base/mman.h"  // For the PROT_* and MAP_* constants.
 #include "base/stl_util.h"
 #include "base/systrace.h"
 #include "base/unix_file/fd_file.h"
@@ -156,14 +156,16 @@ bool ArtDexFileLoader::GetMultiDexChecksums(const char* filename,
   return false;
 }
 
-std::unique_ptr<const DexFile> ArtDexFileLoader::Open(const uint8_t* base,
-                                                      size_t size,
-                                                      const std::string& location,
-                                                      uint32_t location_checksum,
-                                                      const OatDexFile* oat_dex_file,
-                                                      bool verify,
-                                                      bool verify_checksum,
-                                                      std::string* error_msg) const {
+std::unique_ptr<const DexFile> ArtDexFileLoader::Open(
+    const uint8_t* base,
+    size_t size,
+    const std::string& location,
+    uint32_t location_checksum,
+    const OatDexFile* oat_dex_file,
+    bool verify,
+    bool verify_checksum,
+    std::string* error_msg,
+    std::unique_ptr<DexFileContainer> container) const {
   ScopedTrace trace(std::string("Open dex file from RAM ") + location);
   return OpenCommon(base,
                     size,
@@ -175,7 +177,7 @@ std::unique_ptr<const DexFile> ArtDexFileLoader::Open(const uint8_t* base,
                     verify,
                     verify_checksum,
                     error_msg,
-                    /*container=*/ nullptr,
+                    std::move(container),
                     /*verify_result=*/ nullptr);
 }
 
@@ -537,17 +539,17 @@ std::unique_ptr<DexFile> ArtDexFileLoader::OpenCommon(const uint8_t* base,
                                                                 error_msg,
                                                                 std::move(container),
                                                                 verify_result);
-
-  // Check if this dex file is located in the framework directory.
-  // If it is, set a flag on the dex file. This is used by hidden API
-  // policy decision logic.
-  // Location can contain multidex suffix, so fetch its canonical version. Note
-  // that this will call `realpath`.
-  std::string path = DexFileLoader::GetDexCanonicalLocation(location.c_str());
-  if (dex_file != nullptr && LocationIsOnSystemFramework(path.c_str())) {
-    dex_file->SetIsPlatformDexFile();
+  if (dex_file != nullptr) {
+    // Set hidden API domain based based on location.
+    // Location can contain multidex suffix, so fetch its canonical version. Note
+    // that this will call `realpath`.
+    std::string path = DexFileLoader::GetDexCanonicalLocation(location.c_str());
+    if (LocationIsOnSystemFramework(path.c_str())) {
+      dex_file->SetHiddenapiDomain(hiddenapi::Domain::kPlatform);
+    } else if (LocationIsOnRuntimeModule(path.c_str())) {
+      dex_file->SetHiddenapiDomain(hiddenapi::Domain::kCorePlatform);
+    }
   }
-
   return dex_file;
 }
 

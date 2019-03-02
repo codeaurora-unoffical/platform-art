@@ -48,6 +48,7 @@ jclass WellKnownClasses::dalvik_system_DexFile;
 jclass WellKnownClasses::dalvik_system_DexPathList;
 jclass WellKnownClasses::dalvik_system_DexPathList__Element;
 jclass WellKnownClasses::dalvik_system_EmulatedStackFrame;
+jclass WellKnownClasses::dalvik_system_InMemoryDexClassLoader;
 jclass WellKnownClasses::dalvik_system_PathClassLoader;
 jclass WellKnownClasses::dalvik_system_VMRuntime;
 jclass WellKnownClasses::java_lang_annotation_Annotation__array;
@@ -83,6 +84,7 @@ jclass WellKnownClasses::org_apache_harmony_dalvik_ddmc_DdmServer;
 
 jmethodID WellKnownClasses::dalvik_system_BaseDexClassLoader_getLdLibraryPath;
 jmethodID WellKnownClasses::dalvik_system_VMRuntime_runFinalization;
+jmethodID WellKnownClasses::dalvik_system_VMRuntime_hiddenApiUsed;
 jmethodID WellKnownClasses::java_lang_Boolean_valueOf;
 jmethodID WellKnownClasses::java_lang_Byte_valueOf;
 jmethodID WellKnownClasses::java_lang_Character_valueOf;
@@ -276,7 +278,7 @@ ArtMethod* WellKnownClasses::StringInitToStringFactory(ArtMethod* string_init) {
       STRING_INIT_LIST(TO_STRING_FACTORY)
   #undef TO_STRING_FACTORY
   LOG(FATAL) << "Could not find StringFactory method for String.<init>";
-  return nullptr;
+  UNREACHABLE();
 }
 
 uint32_t WellKnownClasses::StringInitToEntryPoint(ArtMethod* string_init) {
@@ -288,7 +290,7 @@ uint32_t WellKnownClasses::StringInitToEntryPoint(ArtMethod* string_init) {
       STRING_INIT_LIST(TO_ENTRY_POINT)
   #undef TO_ENTRY_POINT
   LOG(FATAL) << "Could not find StringFactory method for String.<init>";
-  return 0;
+  UNREACHABLE();
 }
 #undef STRING_INIT_LIST
 
@@ -306,6 +308,7 @@ void WellKnownClasses::Init(JNIEnv* env) {
   dalvik_system_DexPathList = CacheClass(env, "dalvik/system/DexPathList");
   dalvik_system_DexPathList__Element = CacheClass(env, "dalvik/system/DexPathList$Element");
   dalvik_system_EmulatedStackFrame = CacheClass(env, "dalvik/system/EmulatedStackFrame");
+  dalvik_system_InMemoryDexClassLoader = CacheClass(env, "dalvik/system/InMemoryDexClassLoader");
   dalvik_system_PathClassLoader = CacheClass(env, "dalvik/system/PathClassLoader");
   dalvik_system_VMRuntime = CacheClass(env, "dalvik/system/VMRuntime");
 
@@ -342,6 +345,7 @@ void WellKnownClasses::Init(JNIEnv* env) {
 
   dalvik_system_BaseDexClassLoader_getLdLibraryPath = CacheMethod(env, dalvik_system_BaseDexClassLoader, false, "getLdLibraryPath", "()Ljava/lang/String;");
   dalvik_system_VMRuntime_runFinalization = CacheMethod(env, dalvik_system_VMRuntime, true, "runFinalization", "(J)V");
+  dalvik_system_VMRuntime_hiddenApiUsed = CacheMethod(env, dalvik_system_VMRuntime, true, "hiddenApiUsed", "(Ljava/lang/String;Ljava/lang/String;IZ)V");
   java_lang_ClassNotFoundException_init = CacheMethod(env, java_lang_ClassNotFoundException, false, "<init>", "(Ljava/lang/String;Ljava/lang/Throwable;)V");
   java_lang_ClassLoader_loadClass = CacheMethod(env, java_lang_ClassLoader, false, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
 
@@ -424,7 +428,7 @@ void WellKnownClasses::LateInit(JNIEnv* env) {
   // to make sure these JNI methods are available.
   java_lang_Runtime_nativeLoad =
       CacheMethod(env, java_lang_Runtime.get(), true, "nativeLoad",
-                  "(Ljava/lang/String;Ljava/lang/ClassLoader;)"
+                  "(Ljava/lang/String;Ljava/lang/ClassLoader;Ljava/lang/Class;)"
                       "Ljava/lang/String;");
   java_lang_reflect_Proxy_init =
     CacheMethod(env, java_lang_reflect_Proxy, false, "<init>",
@@ -484,6 +488,7 @@ void WellKnownClasses::Clear() {
 
   dalvik_system_BaseDexClassLoader_getLdLibraryPath = nullptr;
   dalvik_system_VMRuntime_runFinalization = nullptr;
+  dalvik_system_VMRuntime_hiddenApiUsed = nullptr;
   java_lang_Boolean_valueOf = nullptr;
   java_lang_Byte_valueOf = nullptr;
   java_lang_Character_valueOf = nullptr;

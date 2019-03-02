@@ -181,17 +181,21 @@ static mirror::String* GetClassName(Thread* self, ShadowFrame* shadow_frame, siz
   return param->AsString();
 }
 
+static std::function<hiddenapi::AccessContext()> GetHiddenapiAccessContextFunction(
+    ShadowFrame* frame) {
+  return [=]() REQUIRES_SHARED(Locks::mutator_lock_) {
+    return hiddenapi::AccessContext(frame->GetMethod()->GetDeclaringClass());
+  };
+}
+
 template<typename T>
 static ALWAYS_INLINE bool ShouldDenyAccessToMember(T* member, ShadowFrame* frame)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   // All uses in this file are from reflection
-  constexpr hiddenapi::AccessMethod access_method = hiddenapi::AccessMethod::kReflection;
-  return hiddenapi::ShouldDenyAccessToMember(
-      member,
-      [&]() REQUIRES_SHARED(Locks::mutator_lock_) {
-        return hiddenapi::AccessContext(frame->GetMethod()->GetDeclaringClass());
-      },
-      access_method);
+  constexpr hiddenapi::AccessMethod kAccessMethod = hiddenapi::AccessMethod::kReflection;
+  return hiddenapi::ShouldDenyAccessToMember(member,
+                                             GetHiddenapiAccessContextFunction(frame),
+                                             kAccessMethod);
 }
 
 void UnstartedRuntime::UnstartedClassForNameCommon(Thread* self,
@@ -390,22 +394,23 @@ void UnstartedRuntime::UnstartedClassGetDeclaredMethod(
   Runtime* runtime = Runtime::Current();
   bool transaction = runtime->IsActiveTransaction();
   PointerSize pointer_size = runtime->GetClassLinker()->GetImagePointerSize();
+  auto fn_hiddenapi_access_context = GetHiddenapiAccessContextFunction(shadow_frame);
   ObjPtr<mirror::Method> method;
   if (transaction) {
     if (pointer_size == PointerSize::k64) {
       method = mirror::Class::GetDeclaredMethodInternal<PointerSize::k64, true>(
-          self, klass, name, args);
+          self, klass, name, args, fn_hiddenapi_access_context);
     } else {
       method = mirror::Class::GetDeclaredMethodInternal<PointerSize::k32, true>(
-          self, klass, name, args);
+          self, klass, name, args, fn_hiddenapi_access_context);
     }
   } else {
     if (pointer_size == PointerSize::k64) {
       method = mirror::Class::GetDeclaredMethodInternal<PointerSize::k64, false>(
-          self, klass, name, args);
+          self, klass, name, args, fn_hiddenapi_access_context);
     } else {
       method = mirror::Class::GetDeclaredMethodInternal<PointerSize::k32, false>(
-          self, klass, name, args);
+          self, klass, name, args, fn_hiddenapi_access_context);
     }
   }
   if (method != nullptr && ShouldDenyAccessToMember(method->GetArtMethod(), shadow_frame)) {
@@ -571,12 +576,9 @@ static void GetResourceAsStream(Thread* self,
 
   Runtime* runtime = Runtime::Current();
 
-  std::vector<std::string> split;
-  Split(runtime->GetBootClassPathString(), ':', &split);
-  if (split.empty()) {
-    AbortTransactionOrFail(self,
-                           "Boot classpath not set or split error:: %s",
-                           runtime->GetBootClassPathString().c_str());
+  const std::vector<std::string>& boot_class_path = Runtime::Current()->GetBootClassPath();
+  if (boot_class_path.empty()) {
+    AbortTransactionOrFail(self, "Boot classpath not set");
     return;
   }
 
@@ -584,7 +586,7 @@ static void GetResourceAsStream(Thread* self,
   size_t map_size;
   std::string last_error_msg;  // Only store the last message (we could concatenate).
 
-  for (const std::string& jar_file : split) {
+  for (const std::string& jar_file : boot_class_path) {
     mem_map = FindAndExtractEntry(jar_file, resource_cstr, &map_size, &last_error_msg);
     if (mem_map.IsValid()) {
       break;

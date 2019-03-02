@@ -26,6 +26,7 @@
 #include "base/arena_object.h"
 #include "base/array_ref.h"
 #include "base/iteration_range.h"
+#include "base/mutex.h"
 #include "base/quasi_atomic.h"
 #include "base/stl_util.h"
 #include "base/transform_array_ref.h"
@@ -316,6 +317,7 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
          uint32_t method_idx,
          InstructionSet instruction_set,
          InvokeType invoke_type = kInvalidInvokeType,
+         bool dead_reference_safe = false,
          bool debuggable = false,
          bool osr = false,
          int start_instruction_id = 0)
@@ -335,6 +337,7 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
         has_simd_(false),
         has_loops_(false),
         has_irreducible_loops_(false),
+        dead_reference_safe_(dead_reference_safe),
         debuggable_(debuggable),
         current_instruction_id_(start_instruction_id),
         dex_file_(dex_file),
@@ -525,6 +528,12 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
     has_bounds_checks_ = value;
   }
 
+  // Is the code known to be robust against eliminating dead references
+  // and the effects of early finalization?
+  bool IsDeadReferenceSafe() const { return dead_reference_safe_; }
+
+  void MarkDeadReferenceUnsafe() { dead_reference_safe_ = false; }
+
   bool IsDebuggable() const { return debuggable_; }
 
   // Returns a constant of the given type and value. If it does not exist
@@ -702,6 +711,14 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
   // best effort to keep it up to date in the presence of code elimination
   // so there might be false positives.
   bool has_irreducible_loops_;
+
+  // Is the code known to be robust against eliminating dead references
+  // and the effects of early finalization? If false, dead reference variables
+  // are kept if they might be visible to the garbage collector.
+  // Currently this means that the class was declared to be dead-reference-safe,
+  // the method accesses no reachability-sensitive fields or data, and the same
+  // is true for any methods that were inlined into the current one.
+  bool dead_reference_safe_;
 
   // Indicates whether the graph should be compiled in a way that
   // ensures full debuggability. If false, we can apply more
@@ -894,7 +911,7 @@ class TryCatchInformation : public ArenaObject<kArenaAllocTryCatchInfo> {
   explicit TryCatchInformation(const HTryBoundary& try_entry)
       : try_entry_(&try_entry),
         catch_dex_file_(nullptr),
-        catch_type_index_(DexFile::kDexNoIndex16) {
+        catch_type_index_(dex::TypeIndex::Invalid()) {
     DCHECK(try_entry_ != nullptr);
   }
 
@@ -913,9 +930,9 @@ class TryCatchInformation : public ArenaObject<kArenaAllocTryCatchInfo> {
 
   bool IsCatchBlock() const { return catch_dex_file_ != nullptr; }
 
-  bool IsCatchAllTypeIndex() const {
+  bool IsValidTypeIndex() const {
     DCHECK(IsCatchBlock());
-    return !catch_type_index_.IsValid();
+    return catch_type_index_.IsValid();
   }
 
   dex::TypeIndex GetCatchTypeIndex() const {
@@ -928,6 +945,10 @@ class TryCatchInformation : public ArenaObject<kArenaAllocTryCatchInfo> {
     return *catch_dex_file_;
   }
 
+  void SetInvalidTypeIndex() {
+    catch_type_index_ = dex::TypeIndex::Invalid();
+  }
+
  private:
   // One of possibly several TryBoundary instructions entering the block's try.
   // Only set for try blocks.
@@ -935,7 +956,7 @@ class TryCatchInformation : public ArenaObject<kArenaAllocTryCatchInfo> {
 
   // Exception type information. Only set for catch blocks.
   const DexFile* catch_dex_file_;
-  const dex::TypeIndex catch_type_index_;
+  dex::TypeIndex catch_type_index_;
 };
 
 static constexpr size_t kNoLifetime = -1;
@@ -3241,7 +3262,7 @@ class HDeoptimize final : public HVariableInputSizeInstruction {
             SideEffects::All(),
             dex_pc,
             allocator,
-            /* number_of_inputs */ 1,
+            /* number_of_inputs= */ 1,
             kArenaAllocMisc) {
     SetPackedFlag<kFieldCanBeMoved>(false);
     SetPackedField<DeoptimizeKindField>(kind);
@@ -3266,7 +3287,7 @@ class HDeoptimize final : public HVariableInputSizeInstruction {
             SideEffects::CanTriggerGC(),
             dex_pc,
             allocator,
-            /* number_of_inputs */ 2,
+            /* number_of_inputs= */ 2,
             kArenaAllocMisc) {
     SetPackedFlag<kFieldCanBeMoved>(true);
     SetPackedField<DeoptimizeKindField>(kind);
@@ -4398,7 +4419,7 @@ class HInvokeUnresolved final : public HInvoke {
       : HInvoke(kInvokeUnresolved,
                 allocator,
                 number_of_arguments,
-                0u /* number_of_other_inputs */,
+                /* number_of_other_inputs= */ 0u,
                 return_type,
                 dex_pc,
                 dex_method_index,
@@ -4424,7 +4445,7 @@ class HInvokePolymorphic final : public HInvoke {
       : HInvoke(kInvokePolymorphic,
                 allocator,
                 number_of_arguments,
-                0u /* number_of_other_inputs */,
+                /* number_of_other_inputs= */ 0u,
                 return_type,
                 dex_pc,
                 dex_method_index,
@@ -4450,11 +4471,11 @@ class HInvokeCustom final : public HInvoke {
       : HInvoke(kInvokeCustom,
                 allocator,
                 number_of_arguments,
-                /* number_of_other_inputs */ 0u,
+                /* number_of_other_inputs= */ 0u,
                 return_type,
                 dex_pc,
-                /* dex_method_index */ dex::kDexNoIndex,
-                /* resolved_method */ nullptr,
+                /* dex_method_index= */ dex::kDexNoIndex,
+                /* resolved_method= */ nullptr,
                 kStatic),
       call_site_index_(call_site_index) {
   }
@@ -5893,7 +5914,7 @@ class HArrayGet final : public HExpression<2> {
                  type,
                  SideEffects::ArrayReadOfType(type),
                  dex_pc,
-                 /* is_string_char_at */ false) {
+                 /* is_string_char_at= */ false) {
   }
 
   HArrayGet(HInstruction* array,
@@ -6335,7 +6356,7 @@ class HLoadClass final : public HInstruction {
   ReferenceTypeInfo GetLoadedClassRTI() {
     if (GetPackedFlag<kFlagValidLoadedClassRTI>()) {
       // Note: The is_exact flag from the return value should not be used.
-      return ReferenceTypeInfo::CreateUnchecked(klass_, /* is_exact */ true);
+      return ReferenceTypeInfo::CreateUnchecked(klass_, /* is_exact= */ true);
     } else {
       return ReferenceTypeInfo::CreateInvalid();
     }
@@ -7088,7 +7109,7 @@ class HTypeCheckInstruction : public HVariableInputSizeInstruction {
           side_effects,
           dex_pc,
           allocator,
-          /* number_of_inputs */ check_kind == TypeCheckKind::kBitstringCheck ? 4u : 2u,
+          /* number_of_inputs= */ check_kind == TypeCheckKind::kBitstringCheck ? 4u : 2u,
           kArenaAllocTypeCheckInputs),
         klass_(klass) {
     SetPackedField<TypeCheckKindField>(check_kind);
@@ -7144,7 +7165,7 @@ class HTypeCheckInstruction : public HVariableInputSizeInstruction {
   ReferenceTypeInfo GetTargetClassRTI() {
     if (GetPackedFlag<kFlagValidTargetClassRTI>()) {
       // Note: The is_exact flag from the return value should not be used.
-      return ReferenceTypeInfo::CreateUnchecked(klass_, /* is_exact */ true);
+      return ReferenceTypeInfo::CreateUnchecked(klass_, /* is_exact= */ true);
     } else {
       return ReferenceTypeInfo::CreateInvalid();
     }
@@ -7457,7 +7478,7 @@ class HConstructorFence final : public HVariableInputSizeInstruction {
                                       SideEffects::AllReads(),
                                       dex_pc,
                                       allocator,
-                                      /* number_of_inputs */ 1,
+                                      /* number_of_inputs= */ 1,
                                       kArenaAllocConstructorFenceInputs) {
     DCHECK(fence_object != nullptr);
     SetRawInputAt(0, fence_object);

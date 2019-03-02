@@ -16,7 +16,6 @@
 
 cc_library {
     name: "libsigchain",
-    cpp_std: "gnu++17",
 
     host_supported: true,
     defaults: ["art_defaults"],
@@ -37,12 +36,6 @@ cc_library {
         android: {
             whole_static_libs: ["libasync_safe"],
         },
-    },
-    // Sigchainlib is whole-statically linked into binaries. For Android.mk-based binaries,
-    // this will drag ASAN symbols into the binary, even for modules using LOCAL_SANITIZE := never.
-    // So disable sanitization for now. b/38456126
-    sanitize: {
-        never: true,
     },
 }
 

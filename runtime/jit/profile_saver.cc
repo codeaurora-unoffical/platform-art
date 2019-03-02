@@ -362,7 +362,7 @@ static void SampleClassesAndExecutedMethods(pthread_t profiler_pthread,
       }
       // Visit all of the methods in the class to see which ones were executed.
       for (ArtMethod& method : klass->GetMethods(kRuntimePointerSize)) {
-        if (!method.IsNative()) {
+        if (!method.IsNative() && !method.IsAbstract()) {
           DCHECK(!method.IsProxyMethod());
           const uint16_t counter = method.GetCounter();
           // Mark startup methods as hot if they have more than hot_method_sample_threshold
@@ -431,11 +431,17 @@ void ProfileSaver::FetchAndCacheResolvedClassesAndMethods(bool startup) {
     ProfileCompilationInfo* cached_info = info_it->second;
 
     const std::set<std::string>& locations = it.second;
+    VLOG(profiler) << "Locations for " << it.first << " " << android::base::Join(locations, ':');
+
     for (const auto& pair : hot_methods.GetMap()) {
       const DexFile* const dex_file = pair.first;
       const std::string base_location = DexFileLoader::GetBaseLocation(dex_file->GetLocation());
+      const MethodReferenceCollection::IndexVector& indices = pair.second;
+      VLOG(profiler) << "Location " << dex_file->GetLocation()
+                     << " base_location=" << base_location
+                     << " found=" << (locations.find(base_location) != locations.end())
+                     << " indices size=" << indices.size();
       if (locations.find(base_location) != locations.end()) {
-        const MethodReferenceCollection::IndexVector& indices = pair.second;
         uint8_t flags = Hotness::kFlagHot;
         flags |= startup ? Hotness::kFlagStartup : Hotness::kFlagPostStartup;
         cached_info->AddMethodsForDex(
@@ -448,8 +454,11 @@ void ProfileSaver::FetchAndCacheResolvedClassesAndMethods(bool startup) {
     for (const auto& pair : sampled_methods.GetMap()) {
       const DexFile* const dex_file = pair.first;
       const std::string base_location = DexFileLoader::GetBaseLocation(dex_file->GetLocation());
+      const MethodReferenceCollection::IndexVector& indices = pair.second;
+      VLOG(profiler) << "Location " << base_location
+                     << " found=" << (locations.find(base_location) != locations.end())
+                     << " indices size=" << indices.size();
       if (locations.find(base_location) != locations.end()) {
-        const MethodReferenceCollection::IndexVector& indices = pair.second;
         cached_info->AddMethodsForDex(startup ? Hotness::kFlagStartup : Hotness::kFlagPostStartup,
                                       dex_file,
                                       indices.begin(),
@@ -466,8 +475,7 @@ void ProfileSaver::FetchAndCacheResolvedClassesAndMethods(bool startup) {
                        << " (" << dex_file->GetLocation() << ")";
         cached_info->AddClassesForDex(dex_file, classes.begin(), classes.end());
       } else {
-        VLOG(profiler) << "Location not found " << base_location
-                       << " (" << dex_file->GetLocation() << ")";
+        VLOG(profiler) << "Location not found " << base_location;
       }
     }
     total_number_of_profile_entries_cached += resolved_classes_for_location.size();
@@ -513,6 +521,9 @@ bool ProfileSaver::ProcessProfilingInfo(bool force_save, /*out*/uint16_t* number
     }
     const std::string& filename = it.first;
     const std::set<std::string>& locations = it.second;
+    VLOG(profiler) << "Tracked filename " << filename << " locations "
+                   << android::base::Join(locations, ":");
+
     std::vector<ProfileMethodInfo> profile_methods;
     {
       ScopedObjectAccess soa(Thread::Current());
@@ -527,6 +538,9 @@ bool ProfileSaver::ProcessProfilingInfo(bool force_save, /*out*/uint16_t* number
       }
       uint64_t last_save_number_of_methods = info.GetNumberOfMethods();
       uint64_t last_save_number_of_classes = info.GetNumberOfResolvedClasses();
+      VLOG(profiler) << "last_save_number_of_methods=" << last_save_number_of_methods
+                     << " last_save_number_of_classes=" << last_save_number_of_classes
+                     << " number of profiled methods=" << profile_methods.size();
 
       // Try to add the method data. Note this may fail is the profile loaded from disk contains
       // outdated data (e.g. the previous profiled dex files might have been updated).
@@ -545,6 +559,11 @@ bool ProfileSaver::ProcessProfilingInfo(bool force_save, /*out*/uint16_t* number
           LOG(WARNING) << "Could not merge the profile. Clearing the profile data.";
           info.ClearData();
           force_save = true;
+        }
+      } else if (VLOG_IS_ON(profiler)) {
+        LOG(INFO) << "Failed to find cached profile for " << filename;
+        for (auto&& pair : profile_cache_) {
+          LOG(INFO) << "Cached profile " << pair.first;
         }
       }
 
@@ -662,6 +681,7 @@ void ProfileSaver::Start(const ProfileSaverOptions& options,
   std::vector<std::string> code_paths_to_profile;
   for (const std::string& location : code_paths) {
     if (ShouldProfileLocation(location, options.GetProfileAOTCode()))  {
+      VLOG(profiler) << "Code path to profile " << location;
       code_paths_to_profile.push_back(location);
     }
   }
@@ -780,11 +800,38 @@ bool ProfileSaver::IsStarted() {
 static void AddTrackedLocationsToMap(const std::string& output_filename,
                                      const std::vector<std::string>& code_paths,
                                      SafeMap<std::string, std::set<std::string>>* map) {
+  std::vector<std::string> code_paths_and_filenames;
+  // The dex locations are sometimes set to the filename instead of the full path.
+  // So make sure we have both "locations" when tracking what needs to be profiled.
+  //   - apps + system server have filenames
+  //   - boot classpath elements have full paths
+
+  // TODO(calin, ngeoffray, vmarko) This is an workaround for using filanames as
+  // dex locations - needed to prebuilt with a partial boot image
+  // (commit: c4a924d8c74241057d957d360bf31cd5cd0e4f9c).
+  // We should find a better way which allows us to do the tracking based on full paths.
+  for (const std::string& path : code_paths) {
+    size_t last_sep_index = path.find_last_of('/');
+    if (last_sep_index == path.size() - 1) {
+      // Should not happen, but anyone can register code paths so better be prepared and ignore
+      // such locations.
+      continue;
+    }
+    std::string filename = last_sep_index == std::string::npos
+        ? path
+        : path.substr(last_sep_index + 1);
+
+    code_paths_and_filenames.push_back(path);
+    code_paths_and_filenames.push_back(filename);
+  }
+
   auto it = map->find(output_filename);
   if (it == map->end()) {
-    map->Put(output_filename, std::set<std::string>(code_paths.begin(), code_paths.end()));
+    map->Put(
+        output_filename,
+        std::set<std::string>(code_paths_and_filenames.begin(), code_paths_and_filenames.end()));
   } else {
-    it->second.insert(code_paths.begin(), code_paths.end());
+    it->second.insert(code_paths_and_filenames.begin(), code_paths_and_filenames.end());
   }
 }
 

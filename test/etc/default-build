@@ -80,6 +80,12 @@ else
   HAS_JASMIN_MULTIDEX=false
 fi
 
+if [ -d smali-ex ]; then
+  HAS_SMALI_EX=true
+else
+  HAS_SMALI_EX=false
+fi
+
 if [ -d src-ex ]; then
   HAS_SRC_EX=true
 else
@@ -92,7 +98,7 @@ else
   HAS_SRC_DEX2OAT_UNRESOLVED=false
 fi
 
-if [ -f api-light-greylist.txt -o -f api-dark-greylist.txt -o -f api-blacklist.txt ]; then
+if [ -f hiddenapi-flags.csv ]; then
   HAS_HIDDENAPI_SPEC=true
 else
   HAS_HIDDENAPI_SPEC=false
@@ -327,15 +333,8 @@ function make_hiddenapi() {
     args+=("--output-dex=$1")
     shift
   done
-  if [ -f api-light-greylist.txt ]; then
-    args+=("--light-greylist=api-light-greylist.txt")
-  fi
-  if [ -f api-dark-greylist.txt ]; then
-    args+=("--dark-greylist=api-dark-greylist.txt")
-  fi
-  if [ -f api-blacklist.txt ]; then
-    args+=("--blacklist=api-blacklist.txt")
-  fi
+  args+=("--api-flags=hiddenapi-flags.csv")
+  args+=("--no-force-assign-all")
   ${HIDDENAPI} "${args[@]}"
 }
 
@@ -461,13 +460,25 @@ if [ ${HAS_SRC_EX} = "true" ]; then
     javac_with_bootclasspath -d classes-tmp-for-ex `find src-art -name '*.java'`
     src_tmp_for_ex="-cp classes-tmp-for-ex"
   fi
-  mkdir classes-ex
+  mkdir -p classes-ex
   javac_with_bootclasspath -d classes-ex $src_tmp_for_ex `find src-ex -name '*.java'`
 fi
 
 if [[ -d classes-ex ]] && [ ${NEED_DEX} = "true" ]; then
   make_dex classes-ex
+fi
 
+if [ "${HAS_SMALI_EX}" = "true" -a ${NEED_DEX} = "true" ]; then
+  # Compile Smali classes
+  ${SMALI} -JXmx512m assemble ${SMALI_ARGS} --output smali_classes-ex.dex `find smali-ex -name '*.smali'`
+  if [[ ! -s smali_classes-ex.dex ]] ; then
+    fail "${SMALI} produced no output."
+  fi
+  # Merge smali files into classes-ex.dex.
+  make_dexmerge classes-ex.dex smali_classes-ex.dex
+fi
+
+if [[ -f classes-ex.dex ]]; then
   # Apply hiddenapi on the dex files if the test has API list file(s).
   if [ ${USE_HIDDENAPI} = "true" -a ${HAS_HIDDENAPI_SPEC} = "true" ]; then
     make_hiddenapi classes-ex.dex

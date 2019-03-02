@@ -77,6 +77,7 @@ JNIEXPORT jint JVM_Open(const char* fname, jint flags, jint mode) {
                    << fname << "')";
     }
 
+    flags |= O_CLOEXEC;
     int fd = TEMP_FAILURE_RETRY(open(fname, flags & ~JVM_O_DELETE, mode));
     if (fd < 0) {
         int err = errno;
@@ -317,7 +318,8 @@ JNIEXPORT __attribute__((noreturn)) void JVM_Exit(jint status) {
 
 JNIEXPORT jstring JVM_NativeLoad(JNIEnv* env,
                                  jstring javaFilename,
-                                 jobject javaLoader) {
+                                 jobject javaLoader,
+                                 jclass caller) {
   ScopedUtfChars filename(env, javaFilename);
   if (filename.c_str() == nullptr) {
     return nullptr;
@@ -329,6 +331,7 @@ JNIEXPORT jstring JVM_NativeLoad(JNIEnv* env,
     bool success = vm->LoadNativeLibrary(env,
                                          filename.c_str(),
                                          javaLoader,
+                                         caller,
                                          &error_msg);
     if (success) {
       return nullptr;
@@ -434,36 +437,37 @@ JNIEXPORT void JVM_SetNativeThreadName(JNIEnv* env, jobject jthread, jstring jav
   }
 }
 
-JNIEXPORT jint JVM_IHashCode(JNIEnv* env ATTRIBUTE_UNUSED,
+JNIEXPORT __attribute__((noreturn)) jint JVM_IHashCode(JNIEnv* env ATTRIBUTE_UNUSED,
                              jobject javaObject ATTRIBUTE_UNUSED) {
   UNIMPLEMENTED(FATAL) << "JVM_IHashCode is not implemented";
-  return 0;
+  UNREACHABLE();
 }
 
-JNIEXPORT jlong JVM_NanoTime(JNIEnv* env ATTRIBUTE_UNUSED, jclass unused ATTRIBUTE_UNUSED) {
+JNIEXPORT __attribute__((noreturn)) jlong JVM_NanoTime(JNIEnv* env ATTRIBUTE_UNUSED, jclass unused ATTRIBUTE_UNUSED) {
   UNIMPLEMENTED(FATAL) << "JVM_NanoTime is not implemented";
-  return 0L;
+  UNREACHABLE();
 }
 
-JNIEXPORT void JVM_ArrayCopy(JNIEnv* /* env */, jclass /* unused */, jobject /* javaSrc */,
+JNIEXPORT __attribute__((noreturn)) void JVM_ArrayCopy(JNIEnv* /* env */, jclass /* unused */, jobject /* javaSrc */,
                              jint /* srcPos */, jobject /* javaDst */, jint /* dstPos */,
                              jint /* length */) {
   UNIMPLEMENTED(FATAL) << "JVM_ArrayCopy is not implemented";
+  UNREACHABLE();
 }
 
-JNIEXPORT jint JVM_FindSignal(const char* name ATTRIBUTE_UNUSED) {
+JNIEXPORT __attribute__((noreturn)) jint JVM_FindSignal(const char* name ATTRIBUTE_UNUSED) {
   LOG(FATAL) << "JVM_FindSignal is not implemented";
-  return 0;
+  UNREACHABLE();
 }
 
-JNIEXPORT void* JVM_RegisterSignal(jint signum ATTRIBUTE_UNUSED, void* handler ATTRIBUTE_UNUSED) {
+JNIEXPORT __attribute__((noreturn)) void* JVM_RegisterSignal(jint signum ATTRIBUTE_UNUSED, void* handler ATTRIBUTE_UNUSED) {
   LOG(FATAL) << "JVM_RegisterSignal is not implemented";
-  return nullptr;
+  UNREACHABLE();
 }
 
-JNIEXPORT jboolean JVM_RaiseSignal(jint signum ATTRIBUTE_UNUSED) {
+JNIEXPORT __attribute__((noreturn)) jboolean JVM_RaiseSignal(jint signum ATTRIBUTE_UNUSED) {
   LOG(FATAL) << "JVM_RaiseSignal is not implemented";
-  return JNI_FALSE;
+  UNREACHABLE();
 }
 
 JNIEXPORT __attribute__((noreturn))  void JVM_Halt(jint code) {

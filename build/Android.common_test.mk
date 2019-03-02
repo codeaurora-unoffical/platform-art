@@ -20,12 +20,8 @@ ART_ANDROID_COMMON_TEST_MK = true
 include art/build/Android.common_path.mk
 
 # Directory used for temporary test files on the host.
-# Use a hash calculated from CWD and USER as one of the path
-# components for the test output. This should allow us to run tests from
-# multiple repositories at the same time.
-# We only take the first few characters to keep paths short.
-ART_TMPDIR := $(if $(TMPDIR),$(TMPDIR),/tmp)
-ART_HOST_TEST_DIR := $(ART_TMPDIR)/test-art-$(shell echo $$CWD-${USER} | $(MD5SUM) | cut -c-5)
+# TMPDIR is always provided by the build system as $OUT_DIR-unique temporary directory.
+ART_HOST_TEST_DIR := $(TMPDIR)/test-art
 
 # List of known broken tests that we won't attempt to execute. The test name must be the full
 # rule name such as test-art-host-oat-optimizing-HelloWorld64.
@@ -129,10 +125,11 @@ define build-art-test-dex
     LOCAL_DEX_PREOPT := false
     LOCAL_ADDITIONAL_DEPENDENCIES := art/build/Android.common_test.mk $(4)
     LOCAL_MODULE_TAGS := tests
-    LOCAL_JAVA_LIBRARIES := $(TARGET_CORE_JARS)
+    LOCAL_JAVA_LIBRARIES := $(TARGET_TEST_CORE_JARS)
     LOCAL_MODULE_PATH := $(3)
     LOCAL_DEX_PREOPT_IMAGE_LOCATION := $(TARGET_CORE_IMG_OUT)
     ifneq ($(wildcard $(LOCAL_PATH)/$(2)/main.list),)
+      LOCAL_MIN_SDK_VERSION := 19
       LOCAL_DX_FLAGS := --multi-dex --main-dex-list=$(LOCAL_PATH)/$(2)/main.list --minimal-main-dex
     endif
     include $(BUILD_JAVA_LIBRARY)
@@ -145,9 +142,10 @@ define build-art-test-dex
     LOCAL_NO_STANDARD_LIBRARIES := true
     LOCAL_DEX_PREOPT := false
     LOCAL_ADDITIONAL_DEPENDENCIES := art/build/Android.common_test.mk $(4)
-    LOCAL_JAVA_LIBRARIES := $(HOST_CORE_JARS)
+    LOCAL_JAVA_LIBRARIES := $(HOST_TEST_CORE_JARS)
     LOCAL_DEX_PREOPT_IMAGE := $(HOST_CORE_IMG_LOCATION)
     ifneq ($(wildcard $(LOCAL_PATH)/$(2)/main.list),)
+      LOCAL_MIN_SDK_VERSION := 19
       LOCAL_DX_FLAGS := --multi-dex --main-dex-list=$(LOCAL_PATH)/$(2)/main.list --minimal-main-dex
     endif
     include $(BUILD_HOST_DALVIK_JAVA_LIBRARY)

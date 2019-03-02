@@ -30,10 +30,12 @@
 #include "dex/descriptors_names.h"
 #include "dex/dex_file-inl.h"
 #include "dex/dex_file_annotations.h"
+#include "dex/signature-inl.h"
 #include "dex_cache.h"
 #include "gc/accounting/card_table-inl.h"
 #include "gc/heap-inl.h"
 #include "handle_scope-inl.h"
+#include "hidden_api.h"
 #include "subtype_check.h"
 #include "method.h"
 #include "object-inl.h"
@@ -204,6 +206,10 @@ void Class::SetStatus(Handle<Class> h_this, ClassStatus new_status, Thread* self
     if (!h_this->IsFinalizable()) {
       h_this->SetObjectSizeAllocFastPath(RoundUp(h_this->GetObjectSize(), kObjectAlignment));
     }
+  }
+
+  if (kIsDebugBuild && new_status >= ClassStatus::kInitialized) {
+    CHECK(h_this->WasVerificationAttempted()) << h_this->PrettyClassAndClassLoader();
   }
 
   if (!class_linker_initialized) {
@@ -489,7 +495,7 @@ ArtMethod* Class::FindInterfaceMethod(ObjPtr<DexCache> dex_cache,
                                       PointerSize pointer_size) {
   // We always search by name and signature, ignoring the type index in the MethodId.
   const DexFile& dex_file = *dex_cache->GetDexFile();
-  const DexFile::MethodId& method_id = dex_file.GetMethodId(dex_method_idx);
+  const dex::MethodId& method_id = dex_file.GetMethodId(dex_method_idx);
   StringPiece name = dex_file.StringDataByIdx(method_id.name_idx_);
   const Signature signature = dex_file.GetMethodSignature(method_id);
   return FindInterfaceMethod(name, signature, pointer_size);
@@ -616,7 +622,7 @@ ArtMethod* Class::FindClassMethod(ObjPtr<DexCache> dex_cache,
   }
   // If not found, we need to search by name and signature.
   const DexFile& dex_file = *dex_cache->GetDexFile();
-  const DexFile::MethodId& method_id = dex_file.GetMethodId(dex_method_idx);
+  const dex::MethodId& method_id = dex_file.GetMethodId(dex_method_idx);
   const Signature signature = dex_file.GetMethodSignature(method_id);
   StringPiece name;  // Delay strlen() until actually needed.
   // If we do not have a dex_cache match, try to find the declared method in this class now.
@@ -647,7 +653,7 @@ ArtMethod* Class::FindClassMethod(ObjPtr<DexCache> dex_cache,
       // Matching dex_cache. We cannot compare the `dex_method_idx` anymore because
       // the type index differs, so compare the name index and proto index.
       for (ArtMethod& method : declared_methods) {
-        const DexFile::MethodId& cmp_method_id = dex_file.GetMethodId(method.GetDexMethodIndex());
+        const dex::MethodId& cmp_method_id = dex_file.GetMethodId(method.GetDexMethodIndex());
         if (cmp_method_id.name_idx_ == method_id.name_idx_ &&
             cmp_method_id.proto_idx_ == method_id.proto_idx_) {
           candidate_method = &method;
@@ -1001,7 +1007,7 @@ const char* Class::GetDescriptor(std::string* storage) {
     return storage->c_str();
   } else {
     const DexFile& dex_file = GetDexFile();
-    const DexFile::TypeId& type_id = dex_file.GetTypeId(GetClassDef()->class_idx_);
+    const dex::TypeId& type_id = dex_file.GetTypeId(GetClassDef()->class_idx_);
     return dex_file.GetTypeDescriptor(type_id);
   }
 }
@@ -1014,7 +1020,7 @@ const char* Class::GetArrayDescriptor(std::string* storage) {
   return storage->c_str();
 }
 
-const DexFile::ClassDef* Class::GetClassDef() {
+const dex::ClassDef* Class::GetClassDef() {
   uint16_t class_def_idx = GetDexClassDefIndex();
   if (class_def_idx == DexFile::kDexNoIndex16) {
     return nullptr;
@@ -1082,7 +1088,7 @@ ObjPtr<Class> Class::GetCommonSuperClass(Handle<Class> klass) {
 
 const char* Class::GetSourceFile() {
   const DexFile& dex_file = GetDexFile();
-  const DexFile::ClassDef* dex_class_def = GetClassDef();
+  const dex::ClassDef* dex_class_def = GetClassDef();
   if (dex_class_def == nullptr) {
     // Generated classes have no class def.
     return nullptr;
@@ -1099,8 +1105,8 @@ std::string Class::GetLocation() {
   return "generated class";
 }
 
-const DexFile::TypeList* Class::GetInterfaceTypeList() {
-  const DexFile::ClassDef* class_def = GetClassDef();
+const dex::TypeList* Class::GetInterfaceTypeList() {
+  const dex::ClassDef* class_def = GetClassDef();
   if (class_def == nullptr) {
     return nullptr;
   }
@@ -1243,8 +1249,38 @@ uint32_t Class::Depth() {
 
 dex::TypeIndex Class::FindTypeIndexInOtherDexFile(const DexFile& dex_file) {
   std::string temp;
-  const DexFile::TypeId* type_id = dex_file.FindTypeId(GetDescriptor(&temp));
+  const dex::TypeId* type_id = dex_file.FindTypeId(GetDescriptor(&temp));
   return (type_id == nullptr) ? dex::TypeIndex() : dex_file.GetIndexForTypeId(*type_id);
+}
+
+ALWAYS_INLINE
+static bool IsMethodPreferredOver(ArtMethod* orig_method,
+                                  bool orig_method_hidden,
+                                  ArtMethod* new_method,
+                                  bool new_method_hidden) {
+  DCHECK(new_method != nullptr);
+
+  // Is this the first result?
+  if (orig_method == nullptr) {
+    return true;
+  }
+
+  // Original method is hidden, the new one is not?
+  if (orig_method_hidden && !new_method_hidden) {
+    return true;
+  }
+
+  // We iterate over virtual methods first and then over direct ones,
+  // so we can never be in situation where `orig_method` is direct and
+  // `new_method` is virtual.
+  DCHECK(!orig_method->IsDirect() || new_method->IsDirect());
+
+  // Original method is synthetic, the new one is not?
+  if (orig_method->IsSynthetic() && !new_method->IsSynthetic()) {
+    return true;
+  }
+
+  return false;
 }
 
 template <PointerSize kPointerSize, bool kTransactionActive>
@@ -1252,13 +1288,15 @@ ObjPtr<Method> Class::GetDeclaredMethodInternal(
     Thread* self,
     ObjPtr<Class> klass,
     ObjPtr<String> name,
-    ObjPtr<ObjectArray<Class>> args) {
-  // Covariant return types permit the class to define multiple
-  // methods with the same name and parameter types. Prefer to
-  // return a non-synthetic method in such situations. We may
-  // still return a synthetic method to handle situations like
-  // escalated visibility. We never return miranda methods that
-  // were synthesized by the runtime.
+    ObjPtr<ObjectArray<Class>> args,
+    const std::function<hiddenapi::AccessContext()>& fn_get_access_context) {
+  // Covariant return types (or smali) permit the class to define
+  // multiple methods with the same name and parameter types.
+  // Prefer (in decreasing order of importance):
+  //  1) non-hidden method over hidden
+  //  2) virtual methods over direct
+  //  3) non-synthetic methods over synthetic
+  // We never return miranda methods that were synthesized by the runtime.
   StackHandleScope<3> hs(self);
   auto h_method_name = hs.NewHandle(name);
   if (UNLIKELY(h_method_name == nullptr)) {
@@ -1267,8 +1305,13 @@ ObjPtr<Method> Class::GetDeclaredMethodInternal(
   }
   auto h_args = hs.NewHandle(args);
   Handle<Class> h_klass = hs.NewHandle(klass);
+  constexpr hiddenapi::AccessMethod access_method = hiddenapi::AccessMethod::kNone;
   ArtMethod* result = nullptr;
+  bool result_hidden = false;
   for (auto& m : h_klass->GetDeclaredVirtualMethods(kPointerSize)) {
+    if (m.IsMiranda()) {
+      continue;
+    }
     auto* np_method = m.GetInterfaceMethodIfProxy(kPointerSize);
     // May cause thread suspension.
     ObjPtr<String> np_name = np_method->ResolveNameString();
@@ -1278,14 +1321,24 @@ ObjPtr<Method> Class::GetDeclaredMethodInternal(
       }
       continue;
     }
-    if (!m.IsMiranda()) {
-      if (!m.IsSynthetic()) {
-        return Method::CreateFromArtMethod<kPointerSize, kTransactionActive>(self, &m);
-      }
-      result = &m;  // Remember as potential result if it's not a miranda method.
+    bool m_hidden = hiddenapi::ShouldDenyAccessToMember(&m, fn_get_access_context, access_method);
+    if (!m_hidden && !m.IsSynthetic()) {
+      // Non-hidden, virtual, non-synthetic. Best possible result, exit early.
+      return Method::CreateFromArtMethod<kPointerSize, kTransactionActive>(self, &m);
+    } else if (IsMethodPreferredOver(result, result_hidden, &m, m_hidden)) {
+      // Remember as potential result.
+      result = &m;
+      result_hidden = m_hidden;
     }
   }
-  if (result == nullptr) {
+
+  if ((result != nullptr) && !result_hidden) {
+    // We have not found a non-hidden, virtual, non-synthetic method, but
+    // if we have found a non-hidden, virtual, synthetic method, we cannot
+    // do better than that later.
+    DCHECK(!result->IsDirect());
+    DCHECK(result->IsSynthetic());
+  } else {
     for (auto& m : h_klass->GetDirectMethods(kPointerSize)) {
       auto modifiers = m.GetAccessFlags();
       if ((modifiers & kAccConstructor) != 0) {
@@ -1305,12 +1358,20 @@ ObjPtr<Method> Class::GetDeclaredMethodInternal(
         continue;
       }
       DCHECK(!m.IsMiranda());  // Direct methods cannot be miranda methods.
-      if ((modifiers & kAccSynthetic) == 0) {
+      bool m_hidden = hiddenapi::ShouldDenyAccessToMember(&m, fn_get_access_context, access_method);
+      if (!m_hidden && !m.IsSynthetic()) {
+        // Non-hidden, direct, non-synthetic. Any virtual result could only have been
+        // hidden, therefore this is the best possible match. Exit now.
+        DCHECK((result == nullptr) || result_hidden);
         return Method::CreateFromArtMethod<kPointerSize, kTransactionActive>(self, &m);
+      } else if (IsMethodPreferredOver(result, result_hidden, &m, m_hidden)) {
+        // Remember as potential result.
+        result = &m;
+        result_hidden = m_hidden;
       }
-      result = &m;  // Remember as potential result.
     }
   }
+
   return result != nullptr
       ? Method::CreateFromArtMethod<kPointerSize, kTransactionActive>(self, result)
       : nullptr;
@@ -1321,25 +1382,29 @@ ObjPtr<Method> Class::GetDeclaredMethodInternal<PointerSize::k32, false>(
     Thread* self,
     ObjPtr<Class> klass,
     ObjPtr<String> name,
-    ObjPtr<ObjectArray<Class>> args);
+    ObjPtr<ObjectArray<Class>> args,
+    const std::function<hiddenapi::AccessContext()>& fn_get_access_context);
 template
 ObjPtr<Method> Class::GetDeclaredMethodInternal<PointerSize::k32, true>(
     Thread* self,
     ObjPtr<Class> klass,
     ObjPtr<String> name,
-    ObjPtr<ObjectArray<Class>> args);
+    ObjPtr<ObjectArray<Class>> args,
+    const std::function<hiddenapi::AccessContext()>& fn_get_access_context);
 template
 ObjPtr<Method> Class::GetDeclaredMethodInternal<PointerSize::k64, false>(
     Thread* self,
     ObjPtr<Class> klass,
     ObjPtr<String> name,
-    ObjPtr<ObjectArray<Class>> args);
+    ObjPtr<ObjectArray<Class>> args,
+    const std::function<hiddenapi::AccessContext()>& fn_get_access_context);
 template
 ObjPtr<Method> Class::GetDeclaredMethodInternal<PointerSize::k64, true>(
     Thread* self,
     ObjPtr<Class> klass,
     ObjPtr<String> name,
-    ObjPtr<ObjectArray<Class>> args);
+    ObjPtr<ObjectArray<Class>> args,
+    const std::function<hiddenapi::AccessContext()>& fn_get_access_context);
 
 template <PointerSize kPointerSize, bool kTransactionActive>
 ObjPtr<Constructor> Class::GetDeclaredConstructorInternal(
@@ -1460,6 +1525,13 @@ template void Class::GetAccessFlagsDCheck<kVerifyThis>();
 template void Class::GetAccessFlagsDCheck<kVerifyReads>();
 template void Class::GetAccessFlagsDCheck<kVerifyWrites>();
 template void Class::GetAccessFlagsDCheck<kVerifyAll>();
+
+void Class::SetAccessFlagsDCheck(uint32_t new_access_flags) {
+  uint32_t old_access_flags = GetField32<kVerifyNone>(AccessFlagsOffset());
+  // kAccVerificationAttempted is retained.
+  CHECK((old_access_flags & kAccVerificationAttempted) == 0 ||
+        (new_access_flags & kAccVerificationAttempted) != 0);
+}
 
 }  // namespace mirror
 }  // namespace art

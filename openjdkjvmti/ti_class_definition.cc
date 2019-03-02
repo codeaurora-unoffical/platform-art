@@ -32,6 +32,7 @@
 #include "ti_class_definition.h"
 
 #include "base/array_slice.h"
+#include "base/logging.h"
 #include "class_linker-inl.h"
 #include "class_root.h"
 #include "dex/dex_file.h"
@@ -135,7 +136,8 @@ static void DequickenDexFile(const art::DexFile* dex_file,
                              const char* descriptor,
                              /*out*/std::vector<unsigned char>* dex_data)
     REQUIRES_SHARED(art::Locks::mutator_lock_) {
-  std::unique_ptr<FixedUpDexFile> fixed_dex_file(FixedUpDexFile::Create(*dex_file, descriptor));
+  std::unique_ptr<FixedUpDexFile> fixed_dex_file(
+      FixedUpDexFile::Create(*dex_file, descriptor));
   dex_data->resize(fixed_dex_file->Size());
   memcpy(dex_data->data(), fixed_dex_file->Begin(), fixed_dex_file->Size());
 }

@@ -32,7 +32,7 @@ class StandardDexFile : public DexFile {
     // Same for now.
   };
 
-  struct CodeItem : public DexFile::CodeItem {
+  struct CodeItem : public dex::CodeItem {
     static constexpr size_t kAlignment = 4;
 
    private:
@@ -81,10 +81,13 @@ class StandardDexFile : public DexFile {
 
   bool SupportsDefaultMethods() const override;
 
-  uint32_t GetCodeItemSize(const DexFile::CodeItem& item) const override;
+  uint32_t GetCodeItemSize(const dex::CodeItem& item) const override;
 
   size_t GetDequickenedSize() const override {
-    return Size();
+    // JVMTI will run dex layout on standard dex files that have hidden API data,
+    // in order to remove that data. As dexlayout may increase the size of the dex file,
+    // be (very) conservative and add one MB to the size.
+    return Size() + (HasHiddenapiClassData() ? 1 * MB : 0);
   }
 
  private:

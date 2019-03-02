@@ -22,12 +22,11 @@
 
 #include "array.h"
 #include "base/bit_utils.h"
-#include "base/globals.h"
-#include "base/utils.h"
 #include "class.h"
 #include "class_root.h"
 #include "gc/heap-inl.h"
 #include "runtime.h"
+#include "runtime_globals.h"
 #include "thread.h"
 
 namespace art {

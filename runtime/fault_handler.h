@@ -18,13 +18,13 @@
 #ifndef ART_RUNTIME_FAULT_HANDLER_H_
 #define ART_RUNTIME_FAULT_HANDLER_H_
 
-#include <setjmp.h>
 #include <signal.h>
 #include <stdint.h>
 
 #include <vector>
 
-#include "base/mutex.h"  // For annotalysis.
+#include "base/locks.h"  // For annotalysis.
+#include "runtime_globals.h"  // For CanDoImplicitNullCheckOn.
 
 namespace art {
 

@@ -31,13 +31,8 @@ clean-oat: clean-oat-host clean-oat-target
 .PHONY: clean-oat-host
 clean-oat-host:
 	find $(OUT_DIR) -name "*.oat" -o -name "*.odex" -o -name "*.art" -o -name '*.vdex' | xargs rm -f
-ifneq ($(TMPDIR),)
-	rm -rf $(TMPDIR)/$(USER)/test-*/dalvik-cache/*
+	rm -rf $(TMPDIR)/*/test-*/dalvik-cache/*
 	rm -rf $(TMPDIR)/android-data/dalvik-cache/*
-else
-	rm -rf /tmp/$(USER)/test-*/dalvik-cache/*
-	rm -rf /tmp/android-data/dalvik-cache/*
-endif
 
 .PHONY: clean-oat-target
 clean-oat-target:
@@ -68,7 +63,6 @@ include $(art_path)/tools/ahat/Android.mk
 include $(art_path)/tools/amm/Android.mk
 include $(art_path)/tools/dexfuzz/Android.mk
 include $(art_path)/tools/veridex/Android.mk
-include $(art_path)/libart_fake/Android.mk
 
 ART_HOST_DEPENDENCIES := \
   $(ART_HOST_EXECUTABLES) \
@@ -326,6 +320,53 @@ endif
 
 
 #######################
+# Android Runtime APEX.
+
+include $(CLEAR_VARS)
+
+# The Android Runtime APEX comes in two flavors:
+# - the release module (`com.android.runtime.release`), containing
+#   only "release" artifacts;
+# - the debug module (`com.android.runtime.debug`), containing both
+#   "release" and "debug" artifacts, as well as additional tools.
+#
+# The Android Runtime APEX module (`com.android.runtime`) is an
+# "alias" for one of the previous modules. By default, "user" build
+# variants contain the release module, while "userdebug" and "eng"
+# build variant contain the debug module. However, if
+# `PRODUCT_ART_TARGET_INCLUDE_DEBUG_BUILD` is defined, it overrides
+# the previous logic:
+# - if `PRODUCT_ART_TARGET_INCLUDE_DEBUG_BUILD` is set to `false`, the
+#   build will include the release module (whatever the build
+#   variant);
+# - if `PRODUCT_ART_TARGET_INCLUDE_DEBUG_BUILD` is set to `true`, the
+#   build will include the debug module (whatever the build variant).
+
+art_target_include_debug_build := $(PRODUCT_ART_TARGET_INCLUDE_DEBUG_BUILD)
+ifneq (false,$(art_target_include_debug_build))
+  ifneq (,$(filter userdebug eng,$(TARGET_BUILD_VARIANT)))
+    art_target_include_debug_build := true
+  endif
+endif
+ifeq (true,$(art_target_include_debug_build))
+  # Module with both release and debug variants, as well as
+  # additional tools.
+  TARGET_RUNTIME_APEX := com.android.runtime.debug
+else
+  # Release module (without debug variants nor tools).
+  TARGET_RUNTIME_APEX := com.android.runtime.release
+endif
+
+LOCAL_MODULE := com.android.runtime
+LOCAL_REQUIRED_MODULES := $(TARGET_RUNTIME_APEX)
+
+# Clear locally used variable.
+art_target_include_debug_build :=
+
+include $(BUILD_PHONY_PACKAGE)
+
+
+#######################
 # Fake packages for ART
 
 # The art-runtime package depends on the core ART libraries and binaries. It exists so we can
@@ -345,9 +386,6 @@ LOCAL_REQUIRED_MODULES := \
     libopenjdkjvmti \
     profman \
     libadbconnection \
-
-# For nosy apps, we provide a fake library that avoids namespace issues and gives some warnings.
-LOCAL_REQUIRED_MODULES += libart_fake
 
 # Potentially add in debug variants:
 #
@@ -427,7 +465,7 @@ endif
 define build-art-hiddenapi
 $(shell if [ ! -d frameworks/base ]; then \
   mkdir -p ${TARGET_OUT_COMMON_INTERMEDIATES}/PACKAGING; \
-	touch ${TARGET_OUT_COMMON_INTERMEDIATES}/PACKAGING/hiddenapi-{whitelist,blacklist,dark-greylist,light-greylist}.txt; \
+	touch ${TARGET_OUT_COMMON_INTERMEDIATES}/PACKAGING/hiddenapi-flags.csv; \
   fi;)
 endef
 
@@ -445,11 +483,49 @@ build-art-host:   $(HOST_OUT_EXECUTABLES)/art $(ART_HOST_DEPENDENCIES) $(HOST_CO
 build-art-target: $(TARGET_OUT_EXECUTABLES)/art $(ART_TARGET_DEPENDENCIES) $(TARGET_CORE_IMG_OUTS)
 
 ########################################################################
+# Workaround for not using symbolic links for linker and bionic libraries
+# in a minimal setup (eg buildbot or golem).
+########################################################################
+
+PRIVATE_BIONIC_FILES := \
+  bin/bootstrap/linker \
+  bin/bootstrap/linker64 \
+  lib/bootstrap/libc.so \
+  lib/bootstrap/libm.so \
+  lib/bootstrap/libdl.so \
+  lib64/bootstrap/libc.so \
+  lib64/bootstrap/libm.so \
+  lib64/bootstrap/libdl.so 
+
+.PHONY: art-bionic-files
+art-bionic-files: libc.bootstrap libdl.bootstrap libm.bootstrap linker
+	for f in $(PRIVATE_BIONIC_FILES); do \
+	  tf=$(TARGET_OUT)/$$f; \
+	  if [ -f $$tf ]; then cp -f $$tf $$(echo $$tf | sed 's,bootstrap/,,'); fi; \
+	done
+
+########################################################################
 # Phony target for only building what go/lem requires for pushing ART on /data.
 
 .PHONY: build-art-target-golem
 # Also include libartbenchmark, we always include it when running golem.
 # libstdc++ is needed when building for ART_TARGET_LINUX.
+#
+# Also include the bootstrap Bionic libraries (libc, libdl, libm).
+# These are required as the "main" libc, libdl, and libm have moved to
+# the Runtime APEX. This is a temporary change needed until Golem
+# fully supports the Runtime APEX.
+# TODO(b/121117762): Remove this when the ART Buildbot and Golem have
+# full support for the Runtime APEX.
+#
+# Also include a copy of the ICU .dat prebuilt files in
+# /system/etc/icu on target (see module `icu-data-art-test`), so that
+# it can found even if the Runtime APEX is not available, by setting
+# the environment variable `ART_TEST_ANDROID_RUNTIME_ROOT` to
+# "/system" on device. This is a temporary change needed until Golem
+# fully supports the Runtime APEX.
+# TODO(b/121117762): Remove this when the ART Buildbot and Golem have
+# full support for the Runtime APEX.
 ART_TARGET_SHARED_LIBRARY_BENCHMARK := $(TARGET_OUT_SHARED_LIBRARIES)/libartbenchmark.so
 build-art-target-golem: dex2oat dalvikvm linker libstdc++ \
                         $(TARGET_OUT_EXECUTABLES)/art \
@@ -458,7 +534,10 @@ build-art-target-golem: dex2oat dalvikvm linker libstdc++ \
                         $(ART_TARGET_SHARED_LIBRARY_DEPENDENCIES) \
                         $(ART_TARGET_SHARED_LIBRARY_BENCHMARK) \
                         $(TARGET_CORE_IMG_OUT_BASE).art \
-                        $(TARGET_CORE_IMG_OUT_BASE)-interpreter.art
+                        $(TARGET_CORE_IMG_OUT_BASE)-interpreter.art \
+                        libc.bootstrap libdl.bootstrap libm.bootstrap \
+                        icu-data-art-test \
+                        art-bionic-files
 	# remove debug libraries from public.libraries.txt because golem builds
 	# won't have it.
 	sed -i '/libartd.so/d' $(TARGET_OUT)/etc/public.libraries.txt

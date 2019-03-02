@@ -18,7 +18,6 @@
 #define ART_RUNTIME_DEX_DEX_FILE_ANNOTATIONS_H_
 
 #include "dex/dex_file.h"
-
 #include "handle.h"
 #include "mirror/dex_cache.h"
 #include "mirror/object_array.h"
@@ -79,13 +78,36 @@ bool IsMethodAnnotationPresent(ArtMethod* method,
                                Handle<mirror::Class> annotation_class,
                                uint32_t visibility = DexFile::kDexVisibilityRuntime)
     REQUIRES_SHARED(Locks::mutator_lock_);
+
 // Check whether a method from the `dex_file` with the given `method_index`
 // is annotated with @dalvik.annotation.optimization.FastNative or
 // @dalvik.annotation.optimization.CriticalNative with build visibility.
 // If yes, return the associated access flags, i.e. kAccFastNative or kAccCriticalNative.
 uint32_t GetNativeMethodAnnotationAccessFlags(const DexFile& dex_file,
-                                              const DexFile::ClassDef& class_def,
+                                              const dex::ClassDef& class_def,
                                               uint32_t method_index);
+// Is the field from the `dex_file` with the given `field_index`
+// annotated with @dalvik.annotation.optimization.ReachabilitySensitive?
+bool FieldIsReachabilitySensitive(const DexFile& dex_file,
+                                  const dex::ClassDef& class_def,
+                                  uint32_t field_index);
+// Is the method from the `dex_file` with the given `method_index`
+// annotated with @dalvik.annotation.optimization.ReachabilitySensitive?
+bool MethodIsReachabilitySensitive(const DexFile& dex_file,
+                                   const dex::ClassDef& class_def,
+                                   uint32_t method_index);
+// Does the method from the `dex_file` with the given `method_index` contain an access to a field
+// annotated with @dalvik.annotation.optimization.ReachabilitySensitive, or a call to a method
+// with that annotation?
+// Class_def is the class defining the method. We consider only accessses to classes or methods
+// declared in the static type of the corresponding object. We may overlook accesses to annotated
+// fields or methods that are in neither class_def nor a containing (outer) class.
+bool MethodContainsRSensitiveAccess(const DexFile& dex_file,
+                                    const dex::ClassDef& class_def,
+                                    uint32_t method_index);
+// Is the given class annotated with @dalvik.annotation.optimization.DeadReferenceSafe?
+bool HasDeadReferenceSafeAnnotation(const DexFile& dex_file,
+                                    const dex::ClassDef& class_def);
 
 // Class annotations.
 ObjPtr<mirror::Object> GetAnnotationForClass(Handle<mirror::Class> klass,
@@ -124,7 +146,7 @@ class RuntimeEncodedStaticFieldValueIterator : public EncodedStaticFieldValueIte
   RuntimeEncodedStaticFieldValueIterator(Handle<mirror::DexCache> dex_cache,
                                          Handle<mirror::ClassLoader> class_loader,
                                          ClassLinker* linker,
-                                         const DexFile::ClassDef& class_def)
+                                         const dex::ClassDef& class_def)
       REQUIRES_SHARED(Locks::mutator_lock_)
       : EncodedStaticFieldValueIterator(*dex_cache->GetDexFile(), class_def),
         dex_cache_(dex_cache),

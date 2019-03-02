@@ -16,10 +16,6 @@
 
 #include "thread.h"
 
-#if !defined(__APPLE__)
-#include <sched.h>
-#endif
-
 #include <pthread.h>
 #include <signal.h>
 #include <sys/resource.h>
@@ -39,6 +35,7 @@
 #include <sstream>
 
 #include "android-base/stringprintf.h"
+#include "android-base/strings.h"
 
 #include "arch/context-inl.h"
 #include "arch/context.h"
@@ -47,6 +44,7 @@
 #include "base/atomic.h"
 #include "base/bit_utils.h"
 #include "base/casts.h"
+#include "arch/context.h"
 #include "base/file_utils.h"
 #include "base/memory_tool.h"
 #include "base/mutex.h"
@@ -72,6 +70,7 @@
 #include "gc_root.h"
 #include "handle_scope-inl.h"
 #include "indirect_reference_table-inl.h"
+#include "instrumentation.h"
 #include "interpreter/interpreter.h"
 #include "interpreter/mterp/mterp.h"
 #include "interpreter/shadow_frame-inl.h"
@@ -92,6 +91,7 @@
 #include "oat_quick_method_header.h"
 #include "obj_ptr-inl.h"
 #include "object_lock.h"
+#include "palette/palette.h"
 #include "quick/quick_method_frame_info.h"
 #include "quick_exception_handler.h"
 #include "read_barrier-inl.h"
@@ -159,6 +159,7 @@ void Thread::SetIsGcMarkingAndUpdateEntrypoints(bool is_marking) {
 }
 
 void Thread::InitTlsEntryPoints() {
+  ScopedTrace trace("InitTlsEntryPoints");
   // Insert a placeholder so we can easily tell if we call an unimplemented entry point.
   uintptr_t* begin = reinterpret_cast<uintptr_t*>(&tlsPtr_.jni_entrypoints);
   uintptr_t* end = reinterpret_cast<uintptr_t*>(
@@ -902,6 +903,8 @@ bool Thread::Init(ThreadList* thread_list, JavaVMExt* java_vm, JNIEnvExt* jni_en
   tlsPtr_.pthread_self = pthread_self();
   CHECK(is_started_);
 
+  ScopedTrace trace("Thread::Init");
+
   SetUpAlternateSignalStack();
   if (!InitStackHwm()) {
     return false;
@@ -911,7 +914,10 @@ bool Thread::Init(ThreadList* thread_list, JavaVMExt* java_vm, JNIEnvExt* jni_en
   RemoveSuspendTrigger();
   InitCardTable();
   InitTid();
-  interpreter::InitInterpreterTls(this);
+  {
+    ScopedTrace trace2("InitInterpreterTls");
+    interpreter::InitInterpreterTls(this);
+  }
 
 #ifdef ART_TARGET_ANDROID
   __get_tls()[TLS_SLOT_ART_THREAD_SELF] = this;
@@ -935,6 +941,7 @@ bool Thread::Init(ThreadList* thread_list, JavaVMExt* java_vm, JNIEnvExt* jni_en
     }
   }
 
+  ScopedTrace trace3("ThreadList::Register");
   thread_list->Register(this);
   return true;
 }
@@ -942,6 +949,7 @@ bool Thread::Init(ThreadList* thread_list, JavaVMExt* java_vm, JNIEnvExt* jni_en
 template <typename PeerAction>
 Thread* Thread::Attach(const char* thread_name, bool as_daemon, PeerAction peer_action) {
   Runtime* runtime = Runtime::Current();
+  ScopedTrace trace("Thread::Attach");
   if (runtime == nullptr) {
     LOG(ERROR) << "Thread attaching to non-existent runtime: " <<
         ((thread_name != nullptr) ? thread_name : "(Unnamed)");
@@ -949,6 +957,7 @@ Thread* Thread::Attach(const char* thread_name, bool as_daemon, PeerAction peer_
   }
   Thread* self;
   {
+    ScopedTrace trace2("Thread birth");
     MutexLock mu(nullptr, *Locks::runtime_shutdown_lock_);
     if (runtime->IsShuttingDownLocked()) {
       LOG(WARNING) << "Thread attaching while runtime is shutting down: " <<
@@ -1250,6 +1259,7 @@ static void GetThreadStack(pthread_t thread,
 }
 
 bool Thread::InitStackHwm() {
+  ScopedTrace trace("InitStackHwm");
   void* read_stack_base;
   size_t read_stack_size;
   size_t read_guard_size;
@@ -1875,8 +1885,9 @@ void Thread::DumpState(std::ostream& os, const Thread* thread, pid_t tid) {
 
   // Grab the scheduler stats for this thread.
   std::string scheduler_stats;
-  if (ReadFileToString(StringPrintf("/proc/self/task/%d/schedstat", tid), &scheduler_stats)) {
-    scheduler_stats.resize(scheduler_stats.size() - 1);  // Lose the trailing '\n'.
+  if (ReadFileToString(StringPrintf("/proc/self/task/%d/schedstat", tid), &scheduler_stats)
+      && !scheduler_stats.empty()) {
+    scheduler_stats = android::base::Trim(scheduler_stats);  // Lose the trailing '\n'.
   } else {
     scheduler_stats = "0 0 0";
   }
@@ -1952,8 +1963,7 @@ struct StackDumpVisitor : public MonitorObjectsStackVisitor {
       override
       REQUIRES_SHARED(Locks::mutator_lock_) {
     m = m->GetInterfaceMethodIfProxy(kRuntimePointerSize);
-    ObjPtr<mirror::Class> c = m->GetDeclaringClass();
-    ObjPtr<mirror::DexCache> dex_cache = c->GetDexCache();
+    ObjPtr<mirror::DexCache> dex_cache = m->GetDexCache();
     int line_number = -1;
     if (dex_cache != nullptr) {  // be tolerant of bad input
       const DexFile* dex_file = dex_cache->GetDexFile();
@@ -3607,42 +3617,34 @@ Context* Thread::GetLongJumpContext() {
   return result;
 }
 
-ArtMethod* Thread::GetCurrentMethod(uint32_t* dex_pc,
+ArtMethod* Thread::GetCurrentMethod(uint32_t* dex_pc_out,
                                     bool check_suspended,
                                     bool abort_on_error) const {
   // Note: this visitor may return with a method set, but dex_pc_ being DexFile:kDexNoIndex. This is
   //       so we don't abort in a special situation (thinlocked monitor) when dumping the Java
   //       stack.
-  struct CurrentMethodVisitor final : public StackVisitor {
-    CurrentMethodVisitor(Thread* thread, bool check_suspended, bool abort_on_error)
-        REQUIRES_SHARED(Locks::mutator_lock_)
-        : StackVisitor(thread,
-                       /* context= */nullptr,
-            StackVisitor::StackWalkKind::kIncludeInlinedFrames,
-            check_suspended),
-            method_(nullptr),
-            dex_pc_(0),
-            abort_on_error_(abort_on_error) {}
-    bool VisitFrame() override REQUIRES_SHARED(Locks::mutator_lock_) {
-      ArtMethod* m = GetMethod();
-      if (m->IsRuntimeMethod()) {
-        // Continue if this is a runtime method.
-        return true;
-      }
-      method_ = m;
-      dex_pc_ = GetDexPc(abort_on_error_);
-      return false;
-    }
-    ArtMethod* method_;
-    uint32_t dex_pc_;
-    const bool abort_on_error_;
-  };
-  CurrentMethodVisitor visitor(const_cast<Thread*>(this), check_suspended, abort_on_error);
-  visitor.WalkStack(false);
-  if (dex_pc != nullptr) {
-    *dex_pc = visitor.dex_pc_;
+  ArtMethod* method = nullptr;
+  uint32_t dex_pc = dex::kDexNoIndex;
+  StackVisitor::WalkStack(
+      [&](const StackVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_) {
+        ArtMethod* m = visitor->GetMethod();
+        if (m->IsRuntimeMethod()) {
+          // Continue if this is a runtime method.
+          return true;
+        }
+        method = m;
+        dex_pc = visitor->GetDexPc(abort_on_error);
+        return false;
+      },
+      const_cast<Thread*>(this),
+      /* context= */ nullptr,
+      StackVisitor::StackWalkKind::kIncludeInlinedFrames,
+      check_suspended);
+
+  if (dex_pc_out != nullptr) {
+    *dex_pc_out = dex_pc;
   }
-  return visitor.method_;
+  return method;
 }
 
 bool Thread::HoldsLock(ObjPtr<mirror::Object> object) const {
@@ -4226,6 +4228,34 @@ void Thread::ClearAllInterpreterCaches() {
     }
   } closure;
   Runtime::Current()->GetThreadList()->RunCheckpoint(&closure);
+}
+
+
+void Thread::ReleaseLongJumpContextInternal() {
+  // Each QuickExceptionHandler gets a long jump context and uses
+  // it for doing the long jump, after finding catch blocks/doing deoptimization.
+  // Both finding catch blocks and deoptimization can trigger another
+  // exception such as a result of class loading. So there can be nested
+  // cases of exception handling and multiple contexts being used.
+  // ReleaseLongJumpContext tries to save the context in tlsPtr_.long_jump_context
+  // for reuse so there is no need to always allocate a new one each time when
+  // getting a context. Since we only keep one context for reuse, delete the
+  // existing one since the passed in context is yet to be used for longjump.
+  delete tlsPtr_.long_jump_context;
+}
+
+void Thread::SetNativePriority(int new_priority) {
+  // ART tests on JVM can reach this code path, use tid = 0 as shorthand for current thread.
+  PaletteStatus status = PaletteSchedSetPriority(0, new_priority);
+  CHECK(status == PaletteStatus::kOkay || status == PaletteStatus::kCheckErrno);
+}
+
+int Thread::GetNativePriority() {
+  int priority = 0;
+  // ART tests on JVM can reach this code path, use tid = 0 as shorthand for current thread.
+  PaletteStatus status = PaletteSchedGetPriority(0, &priority);
+  CHECK(status == PaletteStatus::kOkay || status == PaletteStatus::kCheckErrno);
+  return priority;
 }
 
 }  // namespace art

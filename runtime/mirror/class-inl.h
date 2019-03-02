@@ -22,6 +22,7 @@
 #include "art_field.h"
 #include "art_method.h"
 #include "base/array_slice.h"
+#include "base/iteration_range.h"
 #include "base/length_prefixed_array.h"
 #include "base/utils.h"
 #include "class_linker.h"
@@ -31,12 +32,14 @@
 #include "dex/invoke_type.h"
 #include "dex_cache.h"
 #include "iftable.h"
+#include "imtable.h"
 #include "object-inl.h"
 #include "object_array.h"
 #include "read_barrier-inl.h"
 #include "runtime.h"
 #include "string.h"
 #include "subtype_check.h"
+#include "thread-current-inl.h"
 
 namespace art {
 namespace mirror {
@@ -825,7 +828,7 @@ inline bool Class::DescriptorEquals(const char* match) {
     return ProxyDescriptorEquals(match);
   } else {
     const DexFile& dex_file = GetDexFile();
-    const DexFile::TypeId& type_id = dex_file.GetTypeId(GetClassDef()->class_idx_);
+    const dex::TypeId& type_id = dex_file.GetTypeId(GetClassDef()->class_idx_);
     return strcmp(dex_file.GetTypeDescriptor(type_id), match) == 0;
   }
 }
@@ -871,6 +874,9 @@ inline void Class::InitializeClassVisitor::operator()(ObjPtr<Object> obj,
 }
 
 inline void Class::SetAccessFlags(uint32_t new_access_flags) {
+  if (kIsDebugBuild) {
+    SetAccessFlagsDCheck(new_access_flags);
+  }
   // Called inside a transaction when setting pre-verified flag during boot image compilation.
   if (Runtime::Current()->IsActiveTransaction()) {
     SetField32<true>(AccessFlagsOffset(), new_access_flags);
@@ -896,7 +902,7 @@ inline uint32_t Class::NumDirectInterfaces() {
     ObjectArray<Class>* interfaces = GetProxyInterfaces();
     return interfaces != nullptr ? interfaces->GetLength() : 0;
   } else {
-    const DexFile::TypeList* interfaces = GetInterfaceTypeList();
+    const dex::TypeList* interfaces = GetInterfaceTypeList();
     if (interfaces == nullptr) {
       return 0;
     } else {
@@ -1110,6 +1116,18 @@ inline void Class::SetClassLoader(ObjPtr<ClassLoader> new_class_loader) {
     DCHECK(!Runtime::Current()->IsActiveTransaction());
     SetFieldObject<false>(OFFSET_OF_OBJECT_MEMBER(Class, class_loader_), new_class_loader);
   }
+}
+
+inline void Class::SetRecursivelyInitialized() {
+  DCHECK_EQ(GetLockOwnerThreadId(), Thread::Current()->GetThreadId());
+  uint32_t flags = GetField32(OFFSET_OF_OBJECT_MEMBER(Class, access_flags_));
+  SetAccessFlags(flags | kAccRecursivelyInitialized);
+}
+
+inline void Class::SetHasDefaultMethods() {
+  DCHECK_EQ(GetLockOwnerThreadId(), Thread::Current()->GetThreadId());
+  uint32_t flags = GetField32(OFFSET_OF_OBJECT_MEMBER(Class, access_flags_));
+  SetAccessFlags(flags | kAccHasDefaultMethod);
 }
 
 }  // namespace mirror

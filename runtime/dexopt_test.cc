@@ -46,26 +46,13 @@ void DexoptTest::PostRuntimeCreate() {
   ReserveImageSpace();
 }
 
-static std::string ImageLocation() {
-  Runtime* runtime = Runtime::Current();
-  const std::vector<gc::space::ImageSpace*>& image_spaces =
-      runtime->GetHeap()->GetBootImageSpaces();
-  if (image_spaces.empty()) {
-    return "";
-  }
-  return image_spaces[0]->GetImageLocation();
-}
-
 bool DexoptTest::Dex2Oat(const std::vector<std::string>& args, std::string* error_msg) {
-  Runtime* runtime = Runtime::Current();
-
   std::vector<std::string> argv;
-  argv.push_back(runtime->GetCompilerExecutable());
-  if (runtime->IsJavaDebuggable()) {
-    argv.push_back("--debuggable");
+  if (!CommonRuntimeTest::StartDex2OatCommandLine(&argv, error_msg)) {
+    return false;
   }
-  runtime->AddCurrentRuntimeFeaturesAsDex2OatArguments(&argv);
 
+  Runtime* runtime = Runtime::Current();
   if (runtime->GetHiddenApiEnforcementPolicy() != hiddenapi::EnforcementPolicy::kDisabled) {
     argv.push_back("--runtime-arg");
     argv.push_back("-Xhidden-api-checks");
@@ -74,11 +61,6 @@ bool DexoptTest::Dex2Oat(const std::vector<std::string>& args, std::string* erro
   if (!kIsTargetBuild) {
     argv.push_back("--host");
   }
-
-  argv.push_back("--boot-image=" + ImageLocation());
-
-  std::vector<std::string> compiler_options = runtime->GetCompilerOptions();
-  argv.insert(argv.end(), compiler_options.begin(), compiler_options.end());
 
   argv.insert(argv.end(), args.begin(), args.end());
 
@@ -90,7 +72,8 @@ void DexoptTest::GenerateOatForTest(const std::string& dex_location,
                                     const std::string& oat_location,
                                     CompilerFilter::Filter filter,
                                     bool with_alternate_image,
-                                    const char* compilation_reason) {
+                                    const char* compilation_reason,
+                                    const std::vector<std::string>& extra_args) {
   std::string dalvik_cache = GetDalvikCache(GetInstructionSetString(kRuntimeISA));
   std::string dalvik_cache_tmp = dalvik_cache + ".redirected";
 
@@ -119,6 +102,8 @@ void DexoptTest::GenerateOatForTest(const std::string& dex_location,
     args.push_back("--compilation-reason=" + std::string(compilation_reason));
   }
 
+  args.insert(args.end(), extra_args.begin(), extra_args.end());
+
   std::string error_msg;
   ASSERT_TRUE(Dex2Oat(args, &error_msg)) << error_msg;
 
@@ -134,19 +119,19 @@ void DexoptTest::GenerateOatForTest(const std::string& dex_location,
   ASSERT_TRUE(odex_file.get() != nullptr) << error_msg;
   EXPECT_EQ(filter, odex_file->GetCompilerFilter());
 
-  std::unique_ptr<ImageHeader> image_header(
-          gc::space::ImageSpace::ReadImageHeader(image_location.c_str(),
-                                                 kRuntimeISA,
-                                                 &error_msg));
-  ASSERT_TRUE(image_header != nullptr) << error_msg;
+  std::string boot_image_checksums = gc::space::ImageSpace::GetBootClassPathChecksums(
+      Runtime::Current()->GetBootClassPath(), image_location, kRuntimeISA, &error_msg);
+  ASSERT_FALSE(boot_image_checksums.empty()) << error_msg;
+
   const OatHeader& oat_header = odex_file->GetOatHeader();
-  uint32_t combined_checksum = image_header->GetOatChecksum();
 
   if (CompilerFilter::DependsOnImageChecksum(filter)) {
+    const char* checksums = oat_header.GetStoreValueByKey(OatHeader::kBootClassPathChecksumsKey);
+    ASSERT_TRUE(checksums != nullptr);
     if (with_alternate_image) {
-      EXPECT_NE(combined_checksum, oat_header.GetImageFileLocationOatChecksum());
+      EXPECT_NE(boot_image_checksums, checksums);
     } else {
-      EXPECT_EQ(combined_checksum, oat_header.GetImageFileLocationOatChecksum());
+      EXPECT_EQ(boot_image_checksums, checksums);
     }
   }
 }
@@ -154,12 +139,14 @@ void DexoptTest::GenerateOatForTest(const std::string& dex_location,
 void DexoptTest::GenerateOdexForTest(const std::string& dex_location,
                                      const std::string& odex_location,
                                      CompilerFilter::Filter filter,
-                                     const char* compilation_reason) {
+                                     const char* compilation_reason,
+                                     const std::vector<std::string>& extra_args) {
   GenerateOatForTest(dex_location,
                      odex_location,
                      filter,
                      /*with_alternate_image=*/ false,
-                     compilation_reason);
+                     compilation_reason,
+                     extra_args);
 }
 
 void DexoptTest::GenerateOatForTest(const char* dex_location,

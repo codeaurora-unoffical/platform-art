@@ -244,7 +244,7 @@ static jobject DexFile_createCookieWithDirectBuffer(JNIEnv* env,
   }
 
   size_t length = static_cast<size_t>(end - start);
-  memcpy(dex_mem_map.Begin(), base_address, length);
+  memcpy(dex_mem_map.Begin(), base_address + start, length);
   return CreateSingleDexFileCookie(env, std::move(dex_mem_map));
 }
 
@@ -337,8 +337,7 @@ static jboolean DexFile_closeDexFile(JNIEnv* env, jclass, jobject cookie) {
     int32_t i = kDexFileIndexStart;  // Oat file is at index 0.
     for (const DexFile* dex_file : dex_files) {
       if (dex_file != nullptr) {
-        RemoveNativeDebugInfoForDex(soa.Self(), ArrayRef<const uint8_t>(dex_file->Begin(),
-                                                                        dex_file->Size()));
+        RemoveNativeDebugInfoForDex(soa.Self(), dex_file);
         // Only delete the dex file if the dex cache is not found to prevent runtime crashes if there
         // are calls to DexFile.close while the ART DexFile is still in use.
         if (!class_linker->IsDexFileRegistered(soa.Self(), *dex_file)) {
@@ -384,7 +383,7 @@ static jclass DexFile_defineClassNative(JNIEnv* env,
   const std::string descriptor(DotToDescriptor(class_name.c_str()));
   const size_t hash(ComputeModifiedUtf8Hash(descriptor.c_str()));
   for (auto& dex_file : dex_files) {
-    const DexFile::ClassDef* dex_class_def =
+    const dex::ClassDef* dex_class_def =
         OatDexFile::FindClassDef(*dex_file, descriptor.c_str(), hash);
     if (dex_class_def != nullptr) {
       ScopedObjectAccess soa(env);
@@ -441,7 +440,7 @@ static jobjectArray DexFile_getClassNameList(JNIEnv* env, jclass, jobject cookie
   std::set<const char*, CharPointerComparator> descriptors;
   for (auto& dex_file : dex_files) {
     for (size_t i = 0; i < dex_file->NumClassDefs(); ++i) {
-      const DexFile::ClassDef& class_def = dex_file->GetClassDef(i);
+      const dex::ClassDef& class_def = dex_file->GetClassDef(i);
       const char* descriptor = dex_file->GetClassDescriptor(class_def);
       descriptors.insert(descriptor);
     }
@@ -837,8 +836,9 @@ static void DexFile_setTrusted(JNIEnv* env, jclass, jobject j_cookie) {
     return;
   }
 
+  // Assign core platform domain as the dex files are allowed to access all the other domains.
   for (const DexFile* dex_file : dex_files) {
-    const_cast<DexFile*>(dex_file)->SetIsPlatformDexFile();
+    const_cast<DexFile*>(dex_file)->SetHiddenapiDomain(hiddenapi::Domain::kCorePlatform);
   }
 }
 

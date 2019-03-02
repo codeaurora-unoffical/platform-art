@@ -42,7 +42,6 @@
 #include "art_method-inl.h"
 #include "base/array_ref.h"
 #include "base/file_utils.h"
-#include "base/globals.h"
 #include "base/macros.h"
 #include "base/mutex.h"
 #include "base/os.h"
@@ -66,6 +65,7 @@
 #include "mirror/class-inl.h"
 #include "mirror/class.h"
 #include "mirror/object-refvisitor-inl.h"
+#include "runtime_globals.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread_list.h"
 
@@ -1051,7 +1051,7 @@ void Hprof::MarkRootObject(const mirror::Object* obj, jobject jni_obj, HprofHeap
     case HPROF_ROOT_REFERENCE_CLEANUP:
     case HPROF_UNREACHABLE:
       LOG(FATAL) << "obsolete tag " << static_cast<int>(heap_tag);
-      break;
+      UNREACHABLE();
   }
 
   ++objects_in_segment_;

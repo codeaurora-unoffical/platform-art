@@ -27,10 +27,8 @@
 #include "base/safe_map.h"
 #include "base/stringpiece.h"
 #include "base/tracking_safe_map.h"
-#include "base/utils.h"
 #include "class_status.h"
 #include "compiler_filter.h"
-#include "dex/dex_file.h"
 #include "dex/dex_file_layout.h"
 #include "dex/type_lookup_table.h"
 #include "dex/utf.h"
@@ -41,6 +39,7 @@
 namespace art {
 
 class BitVector;
+class DexFile;
 class ElfFile;
 class DexLayoutSections;
 template <class MirrorType> class GcRoot;
@@ -50,6 +49,10 @@ class OatHeader;
 class OatMethodOffsets;
 class OatQuickMethodHeader;
 class VdexFile;
+
+namespace dex {
+struct ClassDef;
+}  // namespace dex
 
 namespace gc {
 namespace collector {
@@ -499,11 +502,14 @@ class OatDexFile final {
     return dex_file_pointer_;
   }
 
+  ArrayRef<const uint8_t> GetQuickenedInfoOf(const DexFile& dex_file,
+                                             uint32_t dex_method_idx) const;
+
   // Looks up a class definition by its class descriptor. Hash must be
   // ComputeModifiedUtf8Hash(descriptor).
-  static const DexFile::ClassDef* FindClassDef(const DexFile& dex_file,
-                                               const char* descriptor,
-                                               size_t hash);
+  static const dex::ClassDef* FindClassDef(const DexFile& dex_file,
+                                           const char* descriptor,
+                                           size_t hash);
 
   // Madvise the dex file based on the state we are moving to.
   static void MadviseDexFile(const DexFile& dex_file, MadviseState state);

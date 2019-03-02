@@ -168,11 +168,11 @@ bool Monitor::Install(Thread* self) {
     }
     case LockWord::kUnlocked: {
       LOG(FATAL) << "Inflating unlocked lock word";
-      break;
+      UNREACHABLE();
     }
     default: {
       LOG(FATAL) << "Invalid monitor state " << lw.GetState();
-      return false;
+      UNREACHABLE();
     }
   }
   LockWord fat(this, lw.GCState());
@@ -277,47 +277,10 @@ void Monitor::SetObject(mirror::Object* object) {
   obj_ = GcRoot<mirror::Object>(object);
 }
 
-// Note: Adapted from CurrentMethodVisitor in thread.cc. We must not resolve here.
-
-struct NthCallerWithDexPcVisitor final : public StackVisitor {
-  explicit NthCallerWithDexPcVisitor(Thread* thread, size_t frame)
-      REQUIRES_SHARED(Locks::mutator_lock_)
-      : StackVisitor(thread, nullptr, StackVisitor::StackWalkKind::kIncludeInlinedFrames),
-        method_(nullptr),
-        dex_pc_(0),
-        current_frame_number_(0),
-        wanted_frame_number_(frame) {}
-  bool VisitFrame() override REQUIRES_SHARED(Locks::mutator_lock_) {
-    ArtMethod* m = GetMethod();
-    if (m == nullptr || m->IsRuntimeMethod()) {
-      // Runtime method, upcall, or resolution issue. Skip.
-      return true;
-    }
-
-    // Is this the requested frame?
-    if (current_frame_number_ == wanted_frame_number_) {
-      method_ = m;
-      dex_pc_ = GetDexPc(/* abort_on_failure=*/ false);
-      return false;
-    }
-
-    // Look for more.
-    current_frame_number_++;
-    return true;
-  }
-
-  ArtMethod* method_;
-  uint32_t dex_pc_;
-
- private:
-  size_t current_frame_number_;
-  const size_t wanted_frame_number_;
-};
-
 // This function is inlined and just helps to not have the VLOG and ATRACE check at all the
 // potential tracing points.
 void Monitor::AtraceMonitorLock(Thread* self, mirror::Object* obj, bool is_wait) {
-  if (UNLIKELY(VLOG_IS_ON(systrace_lock_logging) && ATRACE_ENABLED())) {
+  if (UNLIKELY(VLOG_IS_ON(systrace_lock_logging) && ATraceEnabled())) {
     AtraceMonitorLockImpl(self, obj, is_wait);
   }
 }
@@ -326,13 +289,41 @@ void Monitor::AtraceMonitorLockImpl(Thread* self, mirror::Object* obj, bool is_w
   // Wait() requires a deeper call stack to be useful. Otherwise you'll see "Waiting at
   // Object.java". Assume that we'll wait a nontrivial amount, so it's OK to do a longer
   // stack walk than if !is_wait.
-  NthCallerWithDexPcVisitor visitor(self, is_wait ? 1U : 0U);
-  visitor.WalkStack(false);
+  const size_t wanted_frame_number = is_wait ? 1U : 0U;
+
+  ArtMethod* method = nullptr;
+  uint32_t dex_pc = 0u;
+
+  size_t current_frame_number = 0u;
+  StackVisitor::WalkStack(
+      // Note: Adapted from CurrentMethodVisitor in thread.cc. We must not resolve here.
+      [&](const art::StackVisitor* stack_visitor) REQUIRES_SHARED(Locks::mutator_lock_) {
+        ArtMethod* m = stack_visitor->GetMethod();
+        if (m == nullptr || m->IsRuntimeMethod()) {
+          // Runtime method, upcall, or resolution issue. Skip.
+          return true;
+        }
+
+        // Is this the requested frame?
+        if (current_frame_number == wanted_frame_number) {
+          method = m;
+          dex_pc = stack_visitor->GetDexPc(false /* abort_on_error*/);
+          return false;
+        }
+
+        // Look for more.
+        current_frame_number++;
+        return true;
+      },
+      self,
+      /* context= */ nullptr,
+      art::StackVisitor::StackWalkKind::kIncludeInlinedFrames);
+
   const char* prefix = is_wait ? "Waiting on " : "Locking ";
 
   const char* filename;
   int32_t line_number;
-  TranslateLocation(visitor.method_, visitor.dex_pc_, &filename, &line_number);
+  TranslateLocation(method, dex_pc, &filename, &line_number);
 
   // It would be nice to have a stable "ID" for the object here. However, the only stable thing
   // would be the identity hashcode. But we cannot use IdentityHashcode here: For one, there are
@@ -347,12 +338,12 @@ void Monitor::AtraceMonitorLockImpl(Thread* self, mirror::Object* obj, bool is_w
       (obj == nullptr ? -1 : static_cast<int32_t>(reinterpret_cast<uintptr_t>(obj))),
       (filename != nullptr ? filename : "null"),
       line_number);
-  ATRACE_BEGIN(tmp.c_str());
+  ATraceBegin(tmp.c_str());
 }
 
 void Monitor::AtraceMonitorUnlock() {
   if (UNLIKELY(VLOG_IS_ON(systrace_lock_logging))) {
-    ATRACE_END();
+    ATraceEnd();
   }
 }
 
@@ -440,7 +431,7 @@ void Monitor::Lock(Thread* self) {
     // If systrace logging is enabled, first look at the lock owner. Acquiring the monitor's
     // lock and then re-acquiring the mutator lock can deadlock.
     bool started_trace = false;
-    if (ATRACE_ENABLED()) {
+    if (ATraceEnabled()) {
       if (owner_ != nullptr) {  // Did the owner_ give the lock up?
         std::ostringstream oss;
         std::string name;
@@ -459,7 +450,7 @@ void Monitor::Lock(Thread* self) {
         oss << " blocking from "
             << ArtMethod::PrettyMethod(m) << "(" << (filename != nullptr ? filename : "null")
             << ":" << line_number << ")";
-        ATRACE_BEGIN(oss.str().c_str());
+        ATraceBegin(oss.str().c_str());
         started_trace = true;
       }
     }
@@ -590,7 +581,7 @@ void Monitor::Lock(Thread* self) {
       }
     }
     if (started_trace) {
-      ATRACE_END();
+      ATraceEnd();
     }
     self->SetMonitorEnterObject(nullptr);
     monitor_lock_.Lock(self);  // Reacquire locks in order.
@@ -1245,7 +1236,7 @@ bool Monitor::MonitorExit(Thread* self, mirror::Object* obj) {
       }
       default: {
         LOG(FATAL) << "Invalid monitor state " << lock_word.GetState();
-        return false;
+        UNREACHABLE();
       }
     }
   }
@@ -1289,7 +1280,7 @@ void Monitor::Wait(Thread* self, mirror::Object *obj, int64_t ms, int32_t ns,
       case LockWord::kFatLocked:  // Unreachable given the loop condition above. Fall-through.
       default: {
         LOG(FATAL) << "Invalid monitor state " << lock_word.GetState();
-        return;
+        UNREACHABLE();
       }
     }
   }
@@ -1329,7 +1320,7 @@ void Monitor::DoNotify(Thread* self, mirror::Object* obj, bool notify_all) {
     }
     default: {
       LOG(FATAL) << "Invalid monitor state " << lock_word.GetState();
-      return;
+      UNREACHABLE();
     }
   }
 }
