@@ -24,7 +24,6 @@
 
 #include "base/file_utils.h"
 #include "base/macros.h"
-#include "base/stringpiece.h"
 #include "base/utils.h"
 #include "debugger.h"
 #include "gc/heap.h"
@@ -220,9 +219,6 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-Xjnitrace:_")
           .WithType<std::string>()
           .IntoKey(M::JniTrace)
-      .Define("-Xpatchoat:_")
-          .WithType<std::string>()
-          .IntoKey(M::PatchOat)
       .Define({"-Xrelocate", "-Xnorelocate"})
           .WithValues({true, false})
           .IntoKey(M::Relocate)
@@ -610,8 +606,7 @@ bool ParsedOptions::DoParse(const RuntimeOptions& options,
   }
 
   if (!args.Exists(M::CompilerCallbacksPtr) && !args.Exists(M::Image)) {
-    std::string image = GetAndroidRoot();
-    image += "/framework/boot.art";
+    std::string image = GetDefaultBootImageLocation(GetAndroidRoot());
     args.Set(M::Image, image);
   }
 
@@ -738,7 +733,6 @@ void ParsedOptions::Usage(const char* fmt, ...) {
   UsageMessage(stream, "  -Xcompiler:filename\n");
   UsageMessage(stream, "  -Xcompiler-option dex2oat-option\n");
   UsageMessage(stream, "  -Ximage-compiler-option dex2oat-option\n");
-  UsageMessage(stream, "  -Xpatchoat:filename (obsolete, ignored)\n");
   UsageMessage(stream, "  -Xusejit:booleanvalue\n");
   UsageMessage(stream, "  -Xjitinitialsize:N\n");
   UsageMessage(stream, "  -Xjitmaxsize:N\n");

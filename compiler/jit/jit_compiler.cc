@@ -22,12 +22,12 @@
 #include "arch/instruction_set_features.h"
 #include "art_method-inl.h"
 #include "base/logging.h"  // For VLOG
-#include "base/stringpiece.h"
+#include "base/string_view_cpp20.h"
 #include "base/systrace.h"
 #include "base/time_utils.h"
 #include "base/timing_logger.h"
+#include "compiler.h"
 #include "debug/elf_debug_writer.h"
-#include "driver/compiler_driver.h"
 #include "driver/compiler_options.h"
 #include "jit/debugger_interface.h"
 #include "jit/jit.h"
@@ -71,19 +71,19 @@ void JitCompiler::ParseCompilerOptions() {
     DCHECK_EQ(instruction_set, kRuntimeISA);
   }
   std::unique_ptr<const InstructionSetFeatures> instruction_set_features;
-  for (const StringPiece option : runtime->GetCompilerOptions()) {
+  for (const std::string& option : runtime->GetCompilerOptions()) {
     VLOG(compiler) << "JIT compiler option " << option;
     std::string error_msg;
-    if (option.starts_with("--instruction-set-variant=")) {
-      StringPiece str = option.substr(strlen("--instruction-set-variant=")).data();
+    if (StartsWith(option, "--instruction-set-variant=")) {
+      const char* str = option.c_str() + strlen("--instruction-set-variant=");
       VLOG(compiler) << "JIT instruction set variant " << str;
       instruction_set_features = InstructionSetFeatures::FromVariant(
-          instruction_set, str.as_string(), &error_msg);
+          instruction_set, str, &error_msg);
       if (instruction_set_features == nullptr) {
         LOG(WARNING) << "Error parsing " << option << " message=" << error_msg;
       }
-    } else if (option.starts_with("--instruction-set-features=")) {
-      StringPiece str = option.substr(strlen("--instruction-set-features=")).data();
+    } else if (StartsWith(option, "--instruction-set-features=")) {
+      const char* str = option.c_str() + strlen("--instruction-set-features=");
       VLOG(compiler) << "JIT instruction set features " << str;
       if (instruction_set_features == nullptr) {
         instruction_set_features = InstructionSetFeatures::FromVariant(
@@ -93,18 +93,21 @@ void JitCompiler::ParseCompilerOptions() {
         }
       }
       instruction_set_features =
-          instruction_set_features->AddFeaturesFromString(str.as_string(), &error_msg);
+          instruction_set_features->AddFeaturesFromString(str, &error_msg);
       if (instruction_set_features == nullptr) {
         LOG(WARNING) << "Error parsing " << option << " message=" << error_msg;
       }
     }
   }
+
   if (instruction_set_features == nullptr) {
+    // '--instruction-set-features/--instruction-set-variant' were not used.
+    // Use build-time defined features.
     instruction_set_features = InstructionSetFeatures::FromCppDefines();
   }
   compiler_options_->instruction_set_features_ = std::move(instruction_set_features);
   compiler_options_->compiling_with_core_image_ =
-      CompilerDriver::IsCoreImageFilename(runtime->GetImageLocation());
+      CompilerOptions::IsCoreImageFilename(runtime->GetImageLocation());
 
   if (compiler_options_->GetGenerateDebugInfo()) {
     jit_logger_.reset(new JitLogger());
@@ -168,14 +171,8 @@ extern "C" bool jit_generate_debug_info(void* handle) {
 JitCompiler::JitCompiler() {
   compiler_options_.reset(new CompilerOptions());
   ParseCompilerOptions();
-
-  compiler_driver_.reset(new CompilerDriver(
-      compiler_options_.get(),
-      Compiler::kOptimizing,
-      /* thread_count= */ 1,
-      /* swap_fd= */ -1));
-  // Disable dedupe so we can remove compiled methods.
-  compiler_driver_->SetDedupeEnabled(false);
+  compiler_.reset(
+      Compiler::Create(*compiler_options_, /*storage=*/ nullptr, Compiler::kOptimizing));
 }
 
 JitCompiler::~JitCompiler() {
@@ -200,8 +197,7 @@ bool JitCompiler::CompileMethod(Thread* self, ArtMethod* method, bool baseline, 
   {
     TimingLogger::ScopedTiming t2("Compiling", &logger);
     JitCodeCache* const code_cache = runtime->GetJit()->GetCodeCache();
-    success = compiler_driver_->GetCompiler()->JitCompile(
-        self, code_cache, method, baseline, osr, jit_logger_.get());
+    success = compiler_->JitCompile(self, code_cache, method, baseline, osr, jit_logger_.get());
   }
 
   // Trim maps to reduce memory usage.

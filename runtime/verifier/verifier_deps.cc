@@ -17,17 +17,19 @@
 #include "verifier_deps.h"
 
 #include <cstring>
+#include <sstream>
 
 #include "art_field-inl.h"
 #include "art_method-inl.h"
 #include "base/indenter.h"
 #include "base/leb128.h"
 #include "base/mutex-inl.h"
-#include "base/stl_util.h"
 #include "compiler_callbacks.h"
+#include "dex/class_accessor-inl.h"
 #include "dex/dex_file-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_loader.h"
+#include "oat_file.h"
 #include "obj_ptr-inl.h"
 #include "runtime.h"
 
@@ -38,7 +40,7 @@ VerifierDeps::VerifierDeps(const std::vector<const DexFile*>& dex_files, bool ou
     : output_only_(output_only) {
   for (const DexFile* dex_file : dex_files) {
     DCHECK(GetDexFileDeps(*dex_file) == nullptr);
-    std::unique_ptr<DexFileDeps> deps(new DexFileDeps());
+    std::unique_ptr<DexFileDeps> deps(new DexFileDeps(dex_file->NumClassDefs()));
     dex_deps_.emplace(dex_file, std::move(deps));
   }
 }
@@ -46,21 +48,35 @@ VerifierDeps::VerifierDeps(const std::vector<const DexFile*>& dex_files, bool ou
 VerifierDeps::VerifierDeps(const std::vector<const DexFile*>& dex_files)
     : VerifierDeps(dex_files, /*output_only=*/ true) {}
 
-void VerifierDeps::MergeWith(const VerifierDeps& other,
+// Perform logical OR on two bit vectors and assign back to LHS, i.e. `to_update |= other`.
+// Size of the two vectors must be equal.
+// Size of `other` must be equal to size of `to_update`.
+static inline void BitVectorOr(std::vector<bool>& to_update, const std::vector<bool>& other) {
+  DCHECK_EQ(to_update.size(), other.size());
+  std::transform(other.begin(),
+                 other.end(),
+                 to_update.begin(),
+                 to_update.begin(),
+                 std::logical_or<bool>());
+}
+
+void VerifierDeps::MergeWith(std::unique_ptr<VerifierDeps> other,
                              const std::vector<const DexFile*>& dex_files) {
-  DCHECK(dex_deps_.size() == other.dex_deps_.size());
+  DCHECK(other != nullptr);
+  DCHECK_EQ(dex_deps_.size(), other->dex_deps_.size());
   for (const DexFile* dex_file : dex_files) {
     DexFileDeps* my_deps = GetDexFileDeps(*dex_file);
-    const DexFileDeps& other_deps = *other.GetDexFileDeps(*dex_file);
+    DexFileDeps& other_deps = *other->GetDexFileDeps(*dex_file);
     // We currently collect extra strings only on the main `VerifierDeps`,
     // which should be the one passed as `this` in this method.
     DCHECK(other_deps.strings_.empty());
-    MergeSets(my_deps->assignable_types_, other_deps.assignable_types_);
-    MergeSets(my_deps->unassignable_types_, other_deps.unassignable_types_);
-    MergeSets(my_deps->classes_, other_deps.classes_);
-    MergeSets(my_deps->fields_, other_deps.fields_);
-    MergeSets(my_deps->methods_, other_deps.methods_);
-    MergeSets(my_deps->unverified_classes_, other_deps.unverified_classes_);
+    my_deps->assignable_types_.merge(other_deps.assignable_types_);
+    my_deps->unassignable_types_.merge(other_deps.unassignable_types_);
+    my_deps->classes_.merge(other_deps.classes_);
+    my_deps->fields_.merge(other_deps.fields_);
+    my_deps->methods_.merge(other_deps.methods_);
+    BitVectorOr(my_deps->verified_classes_, other_deps.verified_classes_);
+    BitVectorOr(my_deps->redefined_classes_, other_deps.redefined_classes_);
   }
 }
 
@@ -496,18 +512,30 @@ void VerifierDeps::AddAssignability(const DexFile& dex_file,
   }
 }
 
+void VerifierDeps::MaybeRecordClassRedefinition(const DexFile& dex_file,
+                                                const dex::ClassDef& class_def) {
+  VerifierDeps* thread_deps = GetThreadLocalVerifierDeps();
+  if (thread_deps != nullptr) {
+    DexFileDeps* dex_deps = thread_deps->GetDexFileDeps(dex_file);
+    DCHECK_EQ(dex_deps->redefined_classes_.size(), dex_file.NumClassDefs());
+    dex_deps->redefined_classes_[dex_file.GetIndexForClassDef(class_def)] = true;
+  }
+}
+
 void VerifierDeps::MaybeRecordVerificationStatus(const DexFile& dex_file,
-                                                 dex::TypeIndex type_idx,
+                                                 const dex::ClassDef& class_def,
                                                  FailureKind failure_kind) {
-  if (failure_kind == FailureKind::kNoFailure) {
-    // We only record classes that did not fully verify at compile time.
+  if (failure_kind != FailureKind::kNoFailure) {
+    // The `verified_classes_` bit vector is initialized to `false`.
+    // Only continue if we are about to write `true`.
     return;
   }
 
   VerifierDeps* thread_deps = GetThreadLocalVerifierDeps();
   if (thread_deps != nullptr) {
     DexFileDeps* dex_deps = thread_deps->GetDexFileDeps(dex_file);
-    dex_deps->unverified_classes_.insert(type_idx);
+    DCHECK_EQ(dex_deps->verified_classes_.size(), dex_file.NumClassDefs());
+    dex_deps->verified_classes_[dex_file.GetIndexForClassDef(class_def)] = true;
   }
 }
 
@@ -586,16 +614,6 @@ template<> inline dex::StringIndex Decode<dex::StringIndex>(uint32_t in) {
   return dex::StringIndex(in);
 }
 
-// TODO: Clean this up, if we use a template arg here it confuses the compiler.
-static inline void EncodeTuple(std::vector<uint8_t>* out, const dex::TypeIndex& t) {
-  EncodeUnsignedLeb128(out, Encode(t));
-}
-
-// TODO: Clean this up, if we use a template arg here it confuses the compiler.
-static inline void DecodeTuple(const uint8_t** in, const uint8_t* end, dex::TypeIndex* t) {
-  *t = Decode<dex::TypeIndex>(DecodeUint32WithOverflowCheck(in, end));
-}
-
 template<typename T1, typename T2>
 static inline void EncodeTuple(std::vector<uint8_t>* out, const std::tuple<T1, T2>& t) {
   EncodeUnsignedLeb128(out, Encode(std::get<0>(t)));
@@ -632,15 +650,6 @@ static inline void EncodeSet(std::vector<uint8_t>* out, const std::set<T>& set) 
   }
 }
 
-template <typename T>
-static inline void EncodeUint16Vector(std::vector<uint8_t>* out,
-                                      const std::vector<T>& vector) {
-  EncodeUnsignedLeb128(out, vector.size());
-  for (const T& entry : vector) {
-    EncodeUnsignedLeb128(out, Encode(entry));
-  }
-}
-
 template<typename T>
 static inline void DecodeSet(const uint8_t** in, const uint8_t* end, std::set<T>* set) {
   DCHECK(set->empty());
@@ -652,16 +661,29 @@ static inline void DecodeSet(const uint8_t** in, const uint8_t* end, std::set<T>
   }
 }
 
-template<typename T>
-static inline void DecodeUint16Vector(const uint8_t** in,
-                                      const uint8_t* end,
-                                      std::vector<T>* vector) {
-  DCHECK(vector->empty());
+static inline void EncodeUint16SparseBitVector(std::vector<uint8_t>* out,
+                                               const std::vector<bool>& vector,
+                                               bool sparse_value) {
+  DCHECK(IsUint<16>(vector.size()));
+  EncodeUnsignedLeb128(out, std::count(vector.begin(), vector.end(), sparse_value));
+  for (uint16_t idx = 0; idx < vector.size(); ++idx) {
+    if (vector[idx] == sparse_value) {
+      EncodeUnsignedLeb128(out, Encode(idx));
+    }
+  }
+}
+
+static inline void DecodeUint16SparseBitVector(const uint8_t** in,
+                                               const uint8_t* end,
+                                               std::vector<bool>* vector,
+                                               bool sparse_value) {
+  DCHECK(IsUint<16>(vector->size()));
+  std::fill(vector->begin(), vector->end(), !sparse_value);
   size_t num_entries = DecodeUint32WithOverflowCheck(in, end);
-  vector->reserve(num_entries);
   for (size_t i = 0; i < num_entries; ++i) {
-    vector->push_back(
-        Decode<T>(dchecked_integral_cast<uint16_t>(DecodeUint32WithOverflowCheck(in, end))));
+    uint16_t idx = Decode<uint16_t>(DecodeUint32WithOverflowCheck(in, end));
+    DCHECK_LT(idx, vector->size());
+    (*vector)[idx] = sparse_value;
   }
 }
 
@@ -690,6 +712,12 @@ static inline void DecodeStringVector(const uint8_t** in,
   }
 }
 
+static inline std::string ToHex(uint32_t value) {
+  std::stringstream ss;
+  ss << std::hex << value << std::dec;
+  return ss.str();
+}
+
 }  // namespace
 
 void VerifierDeps::Encode(const std::vector<const DexFile*>& dex_files,
@@ -702,7 +730,8 @@ void VerifierDeps::Encode(const std::vector<const DexFile*>& dex_files,
     EncodeSet(buffer, deps.classes_);
     EncodeSet(buffer, deps.fields_);
     EncodeSet(buffer, deps.methods_);
-    EncodeSet(buffer, deps.unverified_classes_);
+    EncodeUint16SparseBitVector(buffer, deps.verified_classes_, /* sparse_value= */ false);
+    EncodeUint16SparseBitVector(buffer, deps.redefined_classes_, /* sparse_value= */ true);
   }
 }
 
@@ -725,7 +754,14 @@ VerifierDeps::VerifierDeps(const std::vector<const DexFile*>& dex_files,
     DecodeSet(&data_start, data_end, &deps->classes_);
     DecodeSet(&data_start, data_end, &deps->fields_);
     DecodeSet(&data_start, data_end, &deps->methods_);
-    DecodeSet(&data_start, data_end, &deps->unverified_classes_);
+    DecodeUint16SparseBitVector(&data_start,
+                                data_end,
+                                &deps->verified_classes_,
+                                /* sparse_value= */ false);
+    DecodeUint16SparseBitVector(&data_start,
+                                data_end,
+                                &deps->redefined_classes_,
+                                /* sparse_value= */ true);
   }
   CHECK_LE(data_start, data_end);
 }
@@ -763,7 +799,7 @@ bool VerifierDeps::DexFileDeps::Equals(const VerifierDeps::DexFileDeps& rhs) con
          (classes_ == rhs.classes_) &&
          (fields_ == rhs.fields_) &&
          (methods_ == rhs.methods_) &&
-         (unverified_classes_ == rhs.unverified_classes_);
+         (verified_classes_ == rhs.verified_classes_);
 }
 
 void VerifierDeps::Dump(VariableIndentationOutputStream* vios) const {
@@ -840,18 +876,22 @@ void VerifierDeps::Dump(VariableIndentationOutputStream* vios) const {
       }
     }
 
-    for (dex::TypeIndex type_index : dep.second->unverified_classes_) {
-      vios->Stream()
-          << dex_file.StringByTypeIdx(type_index)
-          << " is expected to be verified at runtime\n";
+    for (size_t idx = 0; idx < dep.second->verified_classes_.size(); idx++) {
+      if (!dep.second->verified_classes_[idx]) {
+        vios->Stream()
+            << dex_file.GetClassDescriptor(dex_file.GetClassDef(idx))
+            << " will be verified at runtime\n";
+      }
     }
   }
 }
 
-bool VerifierDeps::ValidateDependencies(Handle<mirror::ClassLoader> class_loader,
-                                        Thread* self) const {
+bool VerifierDeps::ValidateDependencies(Thread* self,
+                                        Handle<mirror::ClassLoader> class_loader,
+                                        const std::vector<const DexFile*>& classpath,
+                                        /* out */ std::string* error_msg) const {
   for (const auto& entry : dex_deps_) {
-    if (!VerifyDexFile(class_loader, *entry.first, *entry.second, self)) {
+    if (!VerifyDexFile(class_loader, *entry.first, *entry.second, classpath, self, error_msg)) {
       return false;
     }
   }
@@ -862,10 +902,10 @@ bool VerifierDeps::ValidateDependencies(Handle<mirror::ClassLoader> class_loader
 // the same lookup pattern.
 static ObjPtr<mirror::Class> FindClassAndClearException(ClassLinker* class_linker,
                                                         Thread* self,
-                                                        const char* name,
+                                                        const std::string& name,
                                                         Handle<mirror::ClassLoader> class_loader)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  ObjPtr<mirror::Class> result = class_linker->FindClass(self, name, class_loader);
+  ObjPtr<mirror::Class> result = class_linker->FindClass(self, name.c_str(), class_loader);
   if (result == nullptr) {
     DCHECK(self->IsExceptionPending());
     self->ClearException();
@@ -877,7 +917,8 @@ bool VerifierDeps::VerifyAssignability(Handle<mirror::ClassLoader> class_loader,
                                        const DexFile& dex_file,
                                        const std::set<TypeAssignability>& assignables,
                                        bool expected_assignability,
-                                       Thread* self) const {
+                                       Thread* self,
+                                       /* out */ std::string* error_msg) const {
   StackHandleScope<2> hs(self);
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   MutableHandle<mirror::Class> source(hs.NewHandle<mirror::Class>(nullptr));
@@ -892,22 +933,19 @@ bool VerifierDeps::VerifyAssignability(Handle<mirror::ClassLoader> class_loader,
         FindClassAndClearException(class_linker, self, source_desc.c_str(), class_loader));
 
     if (destination == nullptr) {
-      LOG(INFO) << "VerifiersDeps: Could not resolve class " << destination_desc;
+      *error_msg = "Could not resolve class " + destination_desc;
       return false;
     }
 
     if (source == nullptr) {
-      LOG(INFO) << "VerifierDeps: Could not resolve class " << source_desc;
+      *error_msg = "Could not resolve class " + source_desc;
       return false;
     }
 
     DCHECK(destination->IsResolved() && source->IsResolved());
     if (destination->IsAssignableFrom(source.Get()) != expected_assignability) {
-      LOG(INFO) << "VerifierDeps: Class "
-                << destination_desc
-                << (expected_assignability ? " not " : " ")
-                << "assignable from "
-                << source_desc;
+      *error_msg = "Class " + destination_desc + (expected_assignability ? " not " : " ") +
+          "assignable from " + source_desc;
       return false;
     }
   }
@@ -917,31 +955,27 @@ bool VerifierDeps::VerifyAssignability(Handle<mirror::ClassLoader> class_loader,
 bool VerifierDeps::VerifyClasses(Handle<mirror::ClassLoader> class_loader,
                                  const DexFile& dex_file,
                                  const std::set<ClassResolution>& classes,
-                                 Thread* self) const {
+                                 Thread* self,
+                                 /* out */ std::string* error_msg) const {
   StackHandleScope<1> hs(self);
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   MutableHandle<mirror::Class> cls(hs.NewHandle<mirror::Class>(nullptr));
   for (const auto& entry : classes) {
-    const char* descriptor = dex_file.StringByTypeIdx(entry.GetDexTypeIndex());
+    std::string descriptor = dex_file.StringByTypeIdx(entry.GetDexTypeIndex());
     cls.Assign(FindClassAndClearException(class_linker, self, descriptor, class_loader));
 
     if (entry.IsResolved()) {
       if (cls == nullptr) {
-        LOG(INFO) << "VerifierDeps: Could not resolve class " << descriptor;
+        *error_msg = "Could not resolve class " + descriptor;
         return false;
       } else if (entry.GetAccessFlags() != GetAccessFlags(cls.Get())) {
-        LOG(INFO) << "VerifierDeps: Unexpected access flags on class "
-                  << descriptor
-                  << std::hex
-                  << " (expected="
-                  << entry.GetAccessFlags()
-                  << ", actual="
-                  << GetAccessFlags(cls.Get()) << ")"
-                  << std::dec;
+        *error_msg = "Unexpected access flags on class " + descriptor
+            + " (expected=" + ToHex(entry.GetAccessFlags())
+            + ", actual=" + ToHex(GetAccessFlags(cls.Get())) + ")";
         return false;
       }
     } else if (cls != nullptr) {
-      LOG(INFO) << "VerifierDeps: Unexpected successful resolution of class " << descriptor;
+      *error_msg = "Unexpected successful resolution of class " + descriptor;
       return false;
     }
   }
@@ -960,14 +994,16 @@ static std::string GetFieldDescription(const DexFile& dex_file, uint32_t index) 
 bool VerifierDeps::VerifyFields(Handle<mirror::ClassLoader> class_loader,
                                 const DexFile& dex_file,
                                 const std::set<FieldResolution>& fields,
-                                Thread* self) const {
+                                Thread* self,
+                                /* out */ std::string* error_msg) const {
   // Check recorded fields are resolved the same way, have the same recorded class,
   // and have the same recorded flags.
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   for (const auto& entry : fields) {
     const dex::FieldId& field_id = dex_file.GetFieldId(entry.GetDexFieldIndex());
-    StringPiece name(dex_file.StringDataByIdx(field_id.name_idx_));
-    StringPiece type(dex_file.StringDataByIdx(dex_file.GetTypeId(field_id.type_idx_).descriptor_idx_));
+    std::string_view name(dex_file.StringDataByIdx(field_id.name_idx_));
+    std::string_view type(
+        dex_file.StringDataByIdx(dex_file.GetTypeId(field_id.type_idx_).descriptor_idx_));
     // Only use field_id.class_idx_ when the entry is unresolved, which is rare.
     // Otherwise, we might end up resolving an application class, which is expensive.
     std::string expected_decl_klass = entry.IsResolved()
@@ -976,7 +1012,7 @@ bool VerifierDeps::VerifyFields(Handle<mirror::ClassLoader> class_loader,
     ObjPtr<mirror::Class> cls = FindClassAndClearException(
         class_linker, self, expected_decl_klass.c_str(), class_loader);
     if (cls == nullptr) {
-      LOG(INFO) << "VerifierDeps: Could not resolve class " << expected_decl_klass;
+      *error_msg = "Could not resolve class " + expected_decl_klass;
       return false;
     }
     DCHECK(cls->IsResolved());
@@ -985,25 +1021,25 @@ bool VerifierDeps::VerifyFields(Handle<mirror::ClassLoader> class_loader,
     if (entry.IsResolved()) {
       std::string temp;
       if (field == nullptr) {
-        LOG(INFO) << "VerifierDeps: Could not resolve field "
-                  << GetFieldDescription(dex_file, entry.GetDexFieldIndex());
+        *error_msg = "Could not resolve field " +
+            GetFieldDescription(dex_file, entry.GetDexFieldIndex());
         return false;
       } else if (expected_decl_klass != field->GetDeclaringClass()->GetDescriptor(&temp)) {
-        LOG(INFO) << "VerifierDeps: Unexpected declaring class for field resolution "
-                  << GetFieldDescription(dex_file, entry.GetDexFieldIndex())
-                  << " (expected=" << expected_decl_klass
-                  << ", actual=" << field->GetDeclaringClass()->GetDescriptor(&temp) << ")";
+        *error_msg = "Unexpected declaring class for field resolution "
+            + GetFieldDescription(dex_file, entry.GetDexFieldIndex())
+            + " (expected=" + expected_decl_klass
+            + ", actual=" + field->GetDeclaringClass()->GetDescriptor(&temp) + ")";
         return false;
       } else if (entry.GetAccessFlags() != GetAccessFlags(field)) {
-        LOG(INFO) << "VerifierDeps: Unexpected access flags for resolved field "
-                  << GetFieldDescription(dex_file, entry.GetDexFieldIndex())
-                  << std::hex << " (expected=" << entry.GetAccessFlags()
-                  << ", actual=" << GetAccessFlags(field) << ")" << std::dec;
+        *error_msg = "Unexpected access flags for resolved field "
+            + GetFieldDescription(dex_file, entry.GetDexFieldIndex())
+            + " (expected=" + ToHex(entry.GetAccessFlags())
+            + ", actual=" + ToHex(GetAccessFlags(field)) + ")";
         return false;
       }
     } else if (field != nullptr) {
-      LOG(INFO) << "VerifierDeps: Unexpected successful resolution of field "
-                << GetFieldDescription(dex_file, entry.GetDexFieldIndex());
+      *error_msg = "Unexpected successful resolution of field "
+          + GetFieldDescription(dex_file, entry.GetDexFieldIndex());
       return false;
     }
   }
@@ -1021,7 +1057,8 @@ static std::string GetMethodDescription(const DexFile& dex_file, uint32_t index)
 bool VerifierDeps::VerifyMethods(Handle<mirror::ClassLoader> class_loader,
                                  const DexFile& dex_file,
                                  const std::set<MethodResolution>& methods,
-                                 Thread* self) const {
+                                 Thread* self,
+                                 /* out */ std::string* error_msg) const {
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   PointerSize pointer_size = class_linker->GetImagePointerSize();
 
@@ -1039,7 +1076,7 @@ bool VerifierDeps::VerifyMethods(Handle<mirror::ClassLoader> class_loader,
     ObjPtr<mirror::Class> cls = FindClassAndClearException(
         class_linker, self, expected_decl_klass.c_str(), class_loader);
     if (cls == nullptr) {
-      LOG(INFO) << "VerifierDeps: Could not resolve class " << expected_decl_klass;
+      *error_msg = "Could not resolve class " + expected_decl_klass;
       return false;
     }
     DCHECK(cls->IsResolved());
@@ -1053,53 +1090,110 @@ bool VerifierDeps::VerifyMethods(Handle<mirror::ClassLoader> class_loader,
     if (entry.IsResolved()) {
       std::string temp;
       if (method == nullptr) {
-        LOG(INFO) << "VerifierDeps: Could not resolve method "
-                  << GetMethodDescription(dex_file, entry.GetDexMethodIndex());
+        *error_msg = "Could not resolve method "
+            + GetMethodDescription(dex_file, entry.GetDexMethodIndex());
         return false;
       } else if (expected_decl_klass != method->GetDeclaringClass()->GetDescriptor(&temp)) {
-        LOG(INFO) << "VerifierDeps: Unexpected declaring class for method resolution "
-                  << GetMethodDescription(dex_file, entry.GetDexMethodIndex())
-                  << " (expected="
-                  << expected_decl_klass
-                  << ", actual="
-                  << method->GetDeclaringClass()->GetDescriptor(&temp)
-                  << ")";
+        *error_msg = "Unexpected declaring class for method resolution "
+            + GetMethodDescription(dex_file, entry.GetDexMethodIndex())
+            + " (expected=" + expected_decl_klass
+            + ", actual=" + method->GetDeclaringClass()->GetDescriptor(&temp) + ")";
         return false;
       } else if (entry.GetAccessFlags() != GetAccessFlags(method)) {
-        LOG(INFO) << "VerifierDeps: Unexpected access flags for resolved method resolution "
-                  << GetMethodDescription(dex_file, entry.GetDexMethodIndex())
-                  << std::hex
-                  << " (expected="
-                  << entry.GetAccessFlags()
-                  << ", actual="
-                  << GetAccessFlags(method) << ")"
-                  << std::dec;
+        *error_msg = "Unexpected access flags for resolved method resolution "
+            + GetMethodDescription(dex_file, entry.GetDexMethodIndex())
+            + " (expected=" + ToHex(entry.GetAccessFlags())
+            + ", actual=" + ToHex(GetAccessFlags(method)) + ")";
         return false;
       }
     } else if (method != nullptr) {
-      LOG(INFO) << "VerifierDeps: Unexpected successful resolution of method "
-                << GetMethodDescription(dex_file, entry.GetDexMethodIndex());
+      *error_msg = "Unexpected successful resolution of method "
+          + GetMethodDescription(dex_file, entry.GetDexMethodIndex());
       return false;
     }
   }
   return true;
 }
 
+bool VerifierDeps::IsInDexFiles(const char* descriptor,
+                                size_t hash,
+                                const std::vector<const DexFile*>& dex_files,
+                                /* out */ const DexFile** out_dex_file) const {
+  for (const DexFile* dex_file : dex_files) {
+    if (OatDexFile::FindClassDef(*dex_file, descriptor, hash) != nullptr) {
+      *out_dex_file = dex_file;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool VerifierDeps::VerifyInternalClasses(const DexFile& dex_file,
+                                         const std::vector<const DexFile*>& classpath,
+                                         const std::vector<bool>& verified_classes,
+                                         const std::vector<bool>& redefined_classes,
+                                         /* out */ std::string* error_msg) const {
+  const std::vector<const DexFile*>& boot_classpath =
+      Runtime::Current()->GetClassLinker()->GetBootClassPath();
+
+  for (ClassAccessor accessor : dex_file.GetClasses()) {
+    const char* descriptor = accessor.GetDescriptor();
+
+    const uint16_t class_def_index = accessor.GetClassDefIndex();
+    if (redefined_classes[class_def_index]) {
+      if (verified_classes[class_def_index]) {
+        *error_msg = std::string("Class ") + descriptor + " marked both verified and redefined";
+        return false;
+      }
+
+      // Class was not verified under these dependencies. No need to check it further.
+      continue;
+    }
+
+    // Check that the class resolved into the same dex file. Otherwise there is
+    // a different class with the same descriptor somewhere in one of the parent
+    // class loaders.
+    const size_t hash = ComputeModifiedUtf8Hash(descriptor);
+    const DexFile* cp_dex_file = nullptr;
+    if (IsInDexFiles(descriptor, hash, boot_classpath, &cp_dex_file) ||
+        IsInDexFiles(descriptor, hash, classpath, &cp_dex_file)) {
+      *error_msg = std::string("Class ") + descriptor
+          + " redefines a class in the classpath "
+          + "(dexFile expected=" + dex_file.GetLocation()
+          + ", actual=" + cp_dex_file->GetLocation() + ")";
+      return false;
+    }
+  }
+
+  return true;
+}
+
 bool VerifierDeps::VerifyDexFile(Handle<mirror::ClassLoader> class_loader,
                                  const DexFile& dex_file,
                                  const DexFileDeps& deps,
-                                 Thread* self) const {
-  bool result = VerifyAssignability(
-      class_loader, dex_file, deps.assignable_types_, /* expected_assignability= */ true, self);
-  result = result && VerifyAssignability(
-      class_loader, dex_file, deps.unassignable_types_, /* expected_assignability= */ false, self);
-
-  result = result && VerifyClasses(class_loader, dex_file, deps.classes_, self);
-  result = result && VerifyFields(class_loader, dex_file, deps.fields_, self);
-
-  result = result && VerifyMethods(class_loader, dex_file, deps.methods_, self);
-
-  return result;
+                                 const std::vector<const DexFile*>& classpath,
+                                 Thread* self,
+                                 /* out */ std::string* error_msg) const {
+  return VerifyInternalClasses(dex_file,
+                               classpath,
+                               deps.verified_classes_,
+                               deps.redefined_classes_,
+                               error_msg) &&
+         VerifyAssignability(class_loader,
+                             dex_file,
+                             deps.assignable_types_,
+                             /* expected_assignability= */ true,
+                             self,
+                             error_msg) &&
+         VerifyAssignability(class_loader,
+                             dex_file,
+                             deps.unassignable_types_,
+                             /* expected_assignability= */ false,
+                             self,
+                             error_msg) &&
+         VerifyClasses(class_loader, dex_file, deps.classes_, self, error_msg) &&
+         VerifyFields(class_loader, dex_file, deps.fields_, self, error_msg) &&
+         VerifyMethods(class_loader, dex_file, deps.methods_, self, error_msg);
 }
 
 }  // namespace verifier

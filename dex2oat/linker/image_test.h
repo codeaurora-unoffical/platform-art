@@ -21,9 +21,11 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "android-base/stringprintf.h"
+#include "android-base/strings.h"
 
 #include "art_method-inl.h"
 #include "base/file_utils.h"
@@ -498,7 +500,7 @@ inline void ImageTest::TestWriteRead(ImageHeader::StorageMode storage_mode,
       ObjPtr<mirror::Class> klass = class_linker_->FindSystemClass(soa.Self(), descriptor);
       EXPECT_TRUE(klass != nullptr) << descriptor;
       uint8_t* raw_klass = reinterpret_cast<uint8_t*>(klass.Ptr());
-      if (image_classes.find(StringPiece(descriptor)) == image_classes.end()) {
+      if (image_classes.find(std::string_view(descriptor)) == image_classes.end()) {
         EXPECT_TRUE(raw_klass >= image_end || raw_klass < image_begin) << descriptor;
       } else {
         // Image classes should be located inside the image.

@@ -32,6 +32,7 @@
 #include "ti_redefine.h"
 
 #include <limits>
+#include <string_view>
 
 #include <android-base/logging.h>
 #include <android-base/stringprintf.h>
@@ -40,7 +41,6 @@
 #include "art_jvmti.h"
 #include "art_method-inl.h"
 #include "base/array_ref.h"
-#include "base/stringpiece.h"
 #include "class_linker-inl.h"
 #include "class_root.h"
 #include "debugger.h"
@@ -240,7 +240,7 @@ jvmtiError Redefiner::IsModifiableClass(jvmtiEnv* env ATTRIBUTE_UNUSED,
   art::ScopedObjectAccess soa(self);
   art::StackHandleScope<1> hs(self);
   art::ObjPtr<art::mirror::Object> obj(self->DecodeJObject(klass));
-  if (obj.IsNull()) {
+  if (obj.IsNull() || !obj->IsClass()) {
     return ERR(INVALID_CLASS);
   }
   art::Handle<art::mirror::Class> h_klass(hs.NewHandle(obj->AsClass()));
@@ -256,7 +256,7 @@ jvmtiError Redefiner::GetClassRedefinitionError(jclass klass, /*out*/std::string
   art::ScopedObjectAccess soa(self);
   art::StackHandleScope<1> hs(self);
   art::ObjPtr<art::mirror::Object> obj(self->DecodeJObject(klass));
-  if (obj.IsNull()) {
+  if (obj.IsNull() || !obj->IsClass()) {
     return ERR(INVALID_CLASS);
   }
   art::Handle<art::mirror::Class> h_klass(hs.NewHandle(obj->AsClass()));
@@ -597,7 +597,7 @@ void Redefiner::ClassRedefinition::FindAndAllocateObsoleteMethods(
 // Try and get the declared method. First try to get a virtual method then a direct method if that's
 // not found.
 static art::ArtMethod* FindMethod(art::Handle<art::mirror::Class> klass,
-                                  art::StringPiece name,
+                                  std::string_view name,
                                   art::Signature sig) REQUIRES_SHARED(art::Locks::mutator_lock_) {
   DCHECK(!klass->IsProxyClass());
   for (art::ArtMethod& m : klass->GetDeclaredMethodsSlice(art::kRuntimePointerSize)) {

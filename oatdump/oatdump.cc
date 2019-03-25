@@ -221,10 +221,7 @@ class OatSymbolizer final {
     debug::DebugInfo debug_info{};
     debug_info.compiled_methods = ArrayRef<const debug::MethodDebugInfo>(method_debug_infos_);
 
-    debug::WriteDebugInfo(builder_.get(),
-                          debug_info,
-                          dwarf::DW_DEBUG_FRAME_FORMAT,
-                          /* write_oat_patches= */ true);
+    debug::WriteDebugInfo(builder_.get(), debug_info);
 
     builder_->End();
 
@@ -1250,65 +1247,45 @@ class OatDumper {
     }
     {
       vios->Stream() << "CODE: ";
-      uint32_t code_size_offset = oat_method.GetQuickCodeSizeOffset();
-      if (code_size_offset > oat_file_.Size()) {
-        ScopedIndentation indent2(vios);
+      const void* code = oat_method.GetQuickCode();
+      uint32_t aligned_code_begin = AlignCodeOffset(code_offset);
+      uint64_t aligned_code_end = aligned_code_begin + code_size;
+      if (AddStatsObject(code)) {
+        stats_.Child("Code")->AddBytes(code_size);
+      }
+
+      if (options_.absolute_addresses_) {
+        vios->Stream() << StringPrintf("%p ", code);
+      }
+      vios->Stream() << StringPrintf("(code_offset=0x%08x size=%u)%s\n",
+                                     code_offset,
+                                     code_size,
+                                     code != nullptr ? "..." : "");
+
+      ScopedIndentation indent2(vios);
+      if (aligned_code_begin > oat_file_.Size()) {
         vios->Stream() << StringPrintf("WARNING: "
-                                       "code size offset 0x%08x is past end of file 0x%08zx.",
-                                       code_size_offset, oat_file_.Size());
+                                       "start of code at 0x%08x is past end of file 0x%08zx.",
+                                       aligned_code_begin, oat_file_.Size());
         success = false;
-      } else {
-        const void* code = oat_method.GetQuickCode();
-        uint32_t aligned_code_begin = AlignCodeOffset(code_offset);
-        uint64_t aligned_code_end = aligned_code_begin + code_size;
-        if (AddStatsObject(code)) {
-          stats_.Child("Code")->AddBytes(code_size);
-        }
-
-        if (options_.absolute_addresses_) {
-          vios->Stream() << StringPrintf("%p ", code);
-        }
-        vios->Stream() << StringPrintf("(code_offset=0x%08x size_offset=0x%08x size=%u)%s\n",
-                                       code_offset,
-                                       code_size_offset,
-                                       code_size,
-                                       code != nullptr ? "..." : "");
-
-        ScopedIndentation indent2(vios);
-        if (aligned_code_begin > oat_file_.Size()) {
-          vios->Stream() << StringPrintf("WARNING: "
-                                         "start of code at 0x%08x is past end of file 0x%08zx.",
-                                         aligned_code_begin, oat_file_.Size());
-          success = false;
-        } else if (aligned_code_end > oat_file_.Size()) {
-          vios->Stream() << StringPrintf(
-              "WARNING: "
-              "end of code at 0x%08" PRIx64 " is past end of file 0x%08zx. "
-              "code size is 0x%08x loaded from offset 0x%08x.\n",
-              aligned_code_end, oat_file_.Size(),
-              code_size, code_size_offset);
-          success = false;
-          if (options_.disassemble_code_) {
-            if (code_size_offset + kPrologueBytes <= oat_file_.Size()) {
-              DumpCode(vios, oat_method, code_item_accessor, true, kPrologueBytes);
-            }
-          }
-        } else if (code_size > kMaxCodeSize) {
-          vios->Stream() << StringPrintf(
-              "WARNING: "
-              "code size %d is bigger than max expected threshold of %d. "
-              "code size is 0x%08x loaded from offset 0x%08x.\n",
-              code_size, kMaxCodeSize,
-              code_size, code_size_offset);
-          success = false;
-          if (options_.disassemble_code_) {
-            if (code_size_offset + kPrologueBytes <= oat_file_.Size()) {
-              DumpCode(vios, oat_method, code_item_accessor, true, kPrologueBytes);
-            }
-          }
-        } else if (options_.disassemble_code_) {
-          DumpCode(vios, oat_method, code_item_accessor, !success, 0);
-        }
+      } else if (aligned_code_end > oat_file_.Size()) {
+        vios->Stream() << StringPrintf(
+            "WARNING: "
+            "end of code at 0x%08" PRIx64 " is past end of file 0x%08zx. "
+            "code size is 0x%08x.\n",
+            aligned_code_end, oat_file_.Size(),
+            code_size);
+        success = false;
+      } else if (code_size > kMaxCodeSize) {
+        vios->Stream() << StringPrintf(
+            "WARNING: "
+            "code size %d is bigger than max expected threshold of %d. "
+            "code size is 0x%08x.\n",
+            code_size, kMaxCodeSize,
+            code_size);
+        success = false;
+      } else if (options_.disassemble_code_) {
+        DumpCode(vios, oat_method, code_item_accessor, !success, 0);
       }
     }
     vios->Stream() << std::flush;
@@ -1642,6 +1619,24 @@ class OatDumper {
     }
   }
 
+  std::pair<const uint8_t*, const uint8_t*> GetBootImageLiveObjectsDataRange(gc::Heap* heap) const
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    const std::vector<gc::space::ImageSpace*>& boot_image_spaces = heap->GetBootImageSpaces();
+    const ImageHeader& main_header = boot_image_spaces[0]->GetImageHeader();
+    ObjPtr<mirror::ObjectArray<mirror::Object>> boot_image_live_objects =
+        ObjPtr<mirror::ObjectArray<mirror::Object>>::DownCast(
+            main_header.GetImageRoot<kWithoutReadBarrier>(ImageHeader::kBootImageLiveObjects));
+    DCHECK(boot_image_live_objects != nullptr);
+    DCHECK(heap->ObjectIsInBootImageSpace(boot_image_live_objects));
+    const uint8_t* boot_image_live_objects_address =
+        reinterpret_cast<const uint8_t*>(boot_image_live_objects.Ptr());
+    uint32_t begin_offset = mirror::ObjectArray<mirror::Object>::OffsetOfElement(0).Uint32Value();
+    uint32_t end_offset = mirror::ObjectArray<mirror::Object>::OffsetOfElement(
+        boot_image_live_objects->GetLength()).Uint32Value();
+    return std::make_pair(boot_image_live_objects_address + begin_offset,
+                          boot_image_live_objects_address + end_offset);
+  }
+
   void DumpDataBimgRelRoEntries(std::ostream& os) {
     os << ".data.bimg.rel.ro: ";
     if (oat_file_.GetBootImageRelocations().empty()) {
@@ -1655,28 +1650,39 @@ class OatDumper {
       const std::vector<gc::space::ImageSpace*>& boot_image_spaces =
           runtime->GetHeap()->GetBootImageSpaces();
       ScopedObjectAccess soa(Thread::Current());
+      auto live_objects = GetBootImageLiveObjectsDataRange(runtime->GetHeap());
+      const uint8_t* live_objects_begin = live_objects.first;
+      const uint8_t* live_objects_end = live_objects.second;
       for (const uint32_t& object_offset : oat_file_.GetBootImageRelocations()) {
         uint32_t entry_index = &object_offset - oat_file_.GetBootImageRelocations().data();
         uint32_t entry_offset = entry_index * sizeof(oat_file_.GetBootImageRelocations()[0]);
         os << StringPrintf("  0x%x: 0x%08x", entry_offset, object_offset);
-        uint8_t* object = boot_image_spaces[0]->Begin() + object_offset;
+        uint8_t* address = boot_image_spaces[0]->Begin() + object_offset;
         bool found = false;
         for (gc::space::ImageSpace* space : boot_image_spaces) {
-          uint64_t local_offset = object - space->Begin();
+          uint64_t local_offset = address - space->Begin();
           if (local_offset < space->GetImageHeader().GetImageSize()) {
             if (space->GetImageHeader().GetObjectsSection().Contains(local_offset)) {
-              ObjPtr<mirror::Object> o = reinterpret_cast<mirror::Object*>(object);
-              if (o->IsString()) {
-                os << "   String: " << o->AsString()->ToModifiedUtf8();
-              } else if (o->IsClass()) {
-                os << "   Class: " << o->AsClass()->PrettyDescriptor();
-              } else {
-                os << StringPrintf("   0x%08x %s",
+              if (address >= live_objects_begin && address < live_objects_end) {
+                size_t index =
+                    (address - live_objects_begin) / sizeof(mirror::HeapReference<mirror::Object>);
+                os << StringPrintf("   0x%08x BootImageLiveObject[%zu]",
                                    object_offset,
-                                   o->GetClass()->PrettyDescriptor().c_str());
+                                   index);
+              } else {
+                ObjPtr<mirror::Object> o = reinterpret_cast<mirror::Object*>(address);
+                if (o->IsString()) {
+                  os << "   String: " << o->AsString()->ToModifiedUtf8();
+                } else if (o->IsClass()) {
+                  os << "   Class: " << o->AsClass()->PrettyDescriptor();
+                } else {
+                  os << StringPrintf("   0x%08x %s",
+                                     object_offset,
+                                     o->GetClass()->PrettyDescriptor().c_str());
+                }
               }
             } else if (space->GetImageHeader().GetMethodsSection().Contains(local_offset)) {
-              ArtMethod* m = reinterpret_cast<ArtMethod*>(object);
+              ArtMethod* m = reinterpret_cast<ArtMethod*>(address);
               os << "   ArtMethod: " << m->PrettyMethod();
             } else {
               os << StringPrintf("   0x%08x <unexpected section in %s>",
@@ -3358,20 +3364,24 @@ struct OatdumpArgs : public CmdlineArgs {
  protected:
   using Base = CmdlineArgs;
 
-  ParseStatus ParseCustom(const StringPiece& option, std::string* error_msg) override {
+  ParseStatus ParseCustom(const char* raw_option,
+                          size_t raw_option_length,
+                          std::string* error_msg) override {
+    DCHECK_EQ(strlen(raw_option), raw_option_length);
     {
-      ParseStatus base_parse = Base::ParseCustom(option, error_msg);
+      ParseStatus base_parse = Base::ParseCustom(raw_option, raw_option_length, error_msg);
       if (base_parse != kParseUnknownArgument) {
         return base_parse;
       }
     }
 
-    if (option.starts_with("--oat-file=")) {
-      oat_filename_ = option.substr(strlen("--oat-file=")).data();
-    } else if (option.starts_with("--dex-file=")) {
-      dex_filename_ = option.substr(strlen("--dex-file=")).data();
-    } else if (option.starts_with("--image=")) {
-      image_location_ = option.substr(strlen("--image=")).data();
+    std::string_view option(raw_option, raw_option_length);
+    if (StartsWith(option, "--oat-file=")) {
+      oat_filename_ = raw_option + strlen("--oat-file=");
+    } else if (StartsWith(option, "--dex-file=")) {
+      dex_filename_ = raw_option + strlen("--dex-file=");
+    } else if (StartsWith(option, "--image=")) {
+      image_location_ = raw_option + strlen("--image=");
     } else if (option == "--no-dump:vmap") {
       dump_vmap_ = false;
     } else if (option =="--dump:code_info_stack_maps") {
@@ -3380,32 +3390,32 @@ struct OatdumpArgs : public CmdlineArgs {
       disassemble_code_ = false;
     } else if (option =="--header-only") {
       dump_header_only_ = true;
-    } else if (option.starts_with("--symbolize=")) {
-      oat_filename_ = option.substr(strlen("--symbolize=")).data();
+    } else if (StartsWith(option, "--symbolize=")) {
+      oat_filename_ = raw_option + strlen("--symbolize=");
       symbolize_ = true;
-    } else if (option.starts_with("--only-keep-debug")) {
+    } else if (StartsWith(option, "--only-keep-debug")) {
       only_keep_debug_ = true;
-    } else if (option.starts_with("--class-filter=")) {
-      class_filter_ = option.substr(strlen("--class-filter=")).data();
-    } else if (option.starts_with("--method-filter=")) {
-      method_filter_ = option.substr(strlen("--method-filter=")).data();
-    } else if (option.starts_with("--list-classes")) {
+    } else if (StartsWith(option, "--class-filter=")) {
+      class_filter_ = raw_option + strlen("--class-filter=");
+    } else if (StartsWith(option, "--method-filter=")) {
+      method_filter_ = raw_option + strlen("--method-filter=");
+    } else if (StartsWith(option, "--list-classes")) {
       list_classes_ = true;
-    } else if (option.starts_with("--list-methods")) {
+    } else if (StartsWith(option, "--list-methods")) {
       list_methods_ = true;
-    } else if (option.starts_with("--export-dex-to=")) {
-      export_dex_location_ = option.substr(strlen("--export-dex-to=")).data();
-    } else if (option.starts_with("--addr2instr=")) {
-      if (!android::base::ParseUint(option.substr(strlen("--addr2instr=")).data(), &addr2instr_)) {
+    } else if (StartsWith(option, "--export-dex-to=")) {
+      export_dex_location_ = raw_option + strlen("--export-dex-to=");
+    } else if (StartsWith(option, "--addr2instr=")) {
+      if (!android::base::ParseUint(raw_option + strlen("--addr2instr="), &addr2instr_)) {
         *error_msg = "Address conversion failed";
         return kParseError;
       }
-    } else if (option.starts_with("--app-image=")) {
-      app_image_ = option.substr(strlen("--app-image=")).data();
-    } else if (option.starts_with("--app-oat=")) {
-      app_oat_ = option.substr(strlen("--app-oat=")).data();
-    } else if (option.starts_with("--dump-imt=")) {
-      imt_dump_ = option.substr(strlen("--dump-imt=")).data();
+    } else if (StartsWith(option, "--app-image=")) {
+      app_image_ = raw_option + strlen("--app-image=");
+    } else if (StartsWith(option, "--app-oat=")) {
+      app_oat_ = raw_option + strlen("--app-oat=");
+    } else if (StartsWith(option, "--dump-imt=")) {
+      imt_dump_ = std::string(option.substr(strlen("--dump-imt=")));
     } else if (option == "--dump-imt-stats") {
       imt_stat_dump_ = true;
     } else {
