@@ -359,15 +359,12 @@ class CompilerOptions final {
     max_image_block_size_ = size;
   }
 
+  // Is `boot_image_filename` the name of a core image (small boot
+  // image used for ART testing only)?
+  static bool IsCoreImageFilename(const std::string& boot_image_filename);
+
  private:
   bool ParseDumpInitFailures(const std::string& option, std::string* error_msg);
-  void ParseDumpCfgPasses(const StringPiece& option, UsageFn Usage);
-  void ParseInlineMaxCodeUnits(const StringPiece& option, UsageFn Usage);
-  void ParseNumDexMethods(const StringPiece& option, UsageFn Usage);
-  void ParseTinyMethodMax(const StringPiece& option, UsageFn Usage);
-  void ParseSmallMethodMax(const StringPiece& option, UsageFn Usage);
-  void ParseLargeMethodMax(const StringPiece& option, UsageFn Usage);
-  void ParseHugeMethodMax(const StringPiece& option, UsageFn Usage);
   bool ParseRegisterAllocationStrategy(const std::string& option, std::string* error_msg);
 
   CompilerFilter::Filter compiler_filter_;

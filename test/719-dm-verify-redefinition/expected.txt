@@ -1,3 +1,2 @@
-Found redefinition of boot classes. Not doing fast verification.
+Fast verification failed: Class LRedefined; redefines a class in the classpath
 Hello, world!
-Correct resolution of boot class.

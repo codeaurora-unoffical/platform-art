@@ -17,8 +17,10 @@
 #include "compiler_options.h"
 
 #include <fstream>
+#include <string_view>
 
 #include "android-base/stringprintf.h"
+#include "android-base/strings.h"
 
 #include "arch/instruction_set.h"
 #include "arch/instruction_set_features.h"
@@ -144,7 +146,7 @@ bool CompilerOptions::IsImageClass(const char* descriptor) const {
   // Historical note: We used to hold the set indirectly and there was a distinction between an
   // empty set and a null, null meaning to include all classes. However, the distiction has been
   // removed; if we don't have a profile, we treat it as an empty set of classes. b/77340429
-  return image_classes_.find(StringPiece(descriptor)) != image_classes_.end();
+  return image_classes_.find(std::string_view(descriptor)) != image_classes_.end();
 }
 
 const VerificationResults* CompilerOptions::GetVerificationResults() const {
@@ -181,6 +183,21 @@ bool CompilerOptions::IsMethodVerifiedWithoutFailures(uint32_t method_idx,
     self->ClearException();
   }
   return is_system_class;
+}
+
+bool CompilerOptions::IsCoreImageFilename(const std::string& boot_image_filename) {
+  // Look for "core.art" or "core-*.art".
+  if (android::base::EndsWith(boot_image_filename, "core.art")) {
+    return true;
+  }
+  if (!android::base::EndsWith(boot_image_filename, ".art")) {
+    return false;
+  }
+  size_t slash_pos = boot_image_filename.rfind('/');
+  if (slash_pos == std::string::npos) {
+    return android::base::StartsWith(boot_image_filename, "core-");
+  }
+  return boot_image_filename.compare(slash_pos + 1, 5u, "core-") == 0;
 }
 
 }  // namespace art

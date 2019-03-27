@@ -27,6 +27,7 @@
 #include <memory>
 #include <vector>
 
+#include "base/file_utils.h"
 #include "base/locks.h"
 #include "base/macros.h"
 #include "base/mem_map.h"
@@ -182,6 +183,10 @@ class Runtime {
 
   const std::string& GetImageLocation() const {
     return image_location_;
+  }
+
+  bool IsUsingDefaultBootImageLocation() const {
+    return is_using_default_boot_image_location_;
   }
 
   // Starts a runtime, which may cause threads to be started and code to run.
@@ -823,6 +828,14 @@ class Runtime {
     ThreadPool* const thread_pool_;
   };
 
+  bool LoadAppImageStartupCache() const {
+    return load_app_image_startup_cache_;
+  }
+
+  void SetLoadAppImageStartupCacheEnabled(bool enabled) {
+    load_app_image_startup_cache_ = enabled;
+  }
+
  private:
   static void InitPlatformSignalHandlers();
 
@@ -901,6 +914,7 @@ class Runtime {
   std::vector<std::string> compiler_options_;
   std::vector<std::string> image_compiler_options_;
   std::string image_location_;
+  bool is_using_default_boot_image_location_;
 
   std::vector<std::string> boot_class_path_;
   std::vector<std::string> boot_class_path_locations_;
@@ -1144,6 +1158,8 @@ class Runtime {
   MemMap protected_fault_page_;
 
   uint32_t verifier_logging_threshold_ms_;
+
+  bool load_app_image_startup_cache_ = false;
 
   // Note: See comments on GetFaultMessage.
   friend std::string GetFaultMessageForAbortLogging();

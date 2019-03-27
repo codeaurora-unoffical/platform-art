@@ -18,6 +18,8 @@
 #include <iostream>
 #include <map>
 #include <set>
+#include <string>
+#include <string_view>
 
 #include "android-base/stringprintf.h"
 #include "android-base/strings.h"
@@ -27,6 +29,7 @@
 #include "base/mem_map.h"
 #include "base/os.h"
 #include "base/stl_util.h"
+#include "base/string_view_cpp20.h"
 #include "base/unix_file/fd_file.h"
 #include "dex/art_dex_file_loader.h"
 #include "dex/class_accessor-inl.h"
@@ -110,12 +113,12 @@ class DexClass : public ClassAccessor {
 
   bool HasSuperclass() const { return dex_file_.IsTypeIndexValid(GetSuperclassIndex()); }
 
-  std::string GetSuperclassDescriptor() const {
+  std::string_view GetSuperclassDescriptor() const {
     return HasSuperclass() ? dex_file_.StringByTypeIdx(GetSuperclassIndex()) : "";
   }
 
-  std::set<std::string> GetInterfaceDescriptors() const {
-    std::set<std::string> list;
+  std::set<std::string_view> GetInterfaceDescriptors() const {
+    std::set<std::string_view> list;
     const dex::TypeList* ifaces = dex_file_.GetInterfacesList(GetClassDef());
     for (uint32_t i = 0; ifaces != nullptr && i < ifaces->Size(); ++i) {
       list.insert(dex_file_.StringByTypeIdx(ifaces->GetTypeItem(i).type_idx_));
@@ -128,24 +131,12 @@ class DexClass : public ClassAccessor {
 
   inline bool Equals(const DexClass& other) const {
     bool equals = strcmp(GetDescriptor(), other.GetDescriptor()) == 0;
+
     if (equals) {
-      // TODO(dbrazdil): Check that methods/fields match as well once b/111116543 is fixed.
-      CHECK_EQ(GetAccessFlags(), other.GetAccessFlags())
-          << "Inconsistent access flags of class " << GetDescriptor() << ": "
-          << "0x" << std::hex << GetAccessFlags() << std::dec << " (" << dex_file_.GetLocation()
-          << ") and 0x" << std::hex << other.GetAccessFlags() << std::dec << " ("
-          << other.dex_file_.GetLocation() << ")";
-      CHECK_EQ(GetSuperclassDescriptor(), other.GetSuperclassDescriptor())
-          << "Inconsistent superclass of class " << GetDescriptor() << ": "
-          << GetSuperclassDescriptor() << " (" << dex_file_.GetLocation()
-          << ") and " << other.GetSuperclassDescriptor() << " (" << other.dex_file_.GetLocation()
-          << ")";
-      CHECK(GetInterfaceDescriptors() == other.GetInterfaceDescriptors())
-          << "Inconsistent set of interfaces of class " << GetDescriptor() << ": "
-          << JoinStringSet(GetInterfaceDescriptors()) << " (" << dex_file_.GetLocation()
-          << ") and " << JoinStringSet(other.GetInterfaceDescriptors()) << " ("
-          << other.dex_file_.GetLocation() << ")";
+      LOG(FATAL) << "Class duplication: " << GetDescriptor() << " in " << dex_file_.GetLocation()
+          << " and " << other.dex_file_.GetLocation();
     }
+
     return equals;
   }
 
@@ -153,7 +144,7 @@ class DexClass : public ClassAccessor {
   uint32_t GetAccessFlags() const { return GetClassDef().access_flags_; }
   bool HasAccessFlags(uint32_t mask) const { return (GetAccessFlags() & mask) == mask; }
 
-  static std::string JoinStringSet(const std::set<std::string>& s) {
+  static std::string JoinStringSet(const std::set<std::string_view>& s) {
     return "{" + ::android::base::Join(std::vector<std::string>(s.begin(), s.end()), ",") + "}";
   }
 };
@@ -206,7 +197,7 @@ class DexMember {
   inline uint32_t GetAccessFlags() const { return item_.GetAccessFlags(); }
   inline uint32_t HasAccessFlags(uint32_t mask) const { return (GetAccessFlags() & mask) == mask; }
 
-  inline std::string GetName() const {
+  inline std::string_view GetName() const {
     return IsMethod() ? item_.GetDexFile().GetMethodName(GetMethodId())
                       : item_.GetDexFile().GetFieldName(GetFieldId());
   }
@@ -505,7 +496,7 @@ class Hierarchy final {
   }
 
  private:
-  HierarchyClass* FindClass(const std::string& descriptor) {
+  HierarchyClass* FindClass(const std::string_view& descriptor) {
     auto it = classes_.find(descriptor);
     if (it == classes_.end()) {
       return nullptr;
@@ -536,7 +527,7 @@ class Hierarchy final {
       CHECK(superclass != nullptr);
       klass.AddExtends(*superclass);
 
-      for (const std::string& iface_desc : dex_klass.GetInterfaceDescriptors()) {
+      for (const std::string_view& iface_desc : dex_klass.GetInterfaceDescriptors()) {
         HierarchyClass* iface = FindClass(iface_desc);
         CHECK(iface != nullptr);
         klass.AddExtends(*iface);
@@ -545,7 +536,7 @@ class Hierarchy final {
   }
 
   ClassPath& classpath_;
-  std::map<std::string, HierarchyClass> classes_;
+  std::map<std::string_view, HierarchyClass> classes_;
 };
 
 // Builder of dex section containing hiddenapi flags.
@@ -887,45 +878,48 @@ class HiddenApi final {
     argc--;
 
     if (argc > 0) {
-      const StringPiece command(argv[0]);
+      const char* raw_command = argv[0];
+      const std::string_view command(raw_command);
       if (command == "encode") {
         for (int i = 1; i < argc; ++i) {
-          const StringPiece option(argv[i]);
-          if (option.starts_with("--input-dex=")) {
-            boot_dex_paths_.push_back(option.substr(strlen("--input-dex=")).ToString());
-          } else if (option.starts_with("--output-dex=")) {
-            output_dex_paths_.push_back(option.substr(strlen("--output-dex=")).ToString());
-          } else if (option.starts_with("--api-flags=")) {
-            api_flags_path_ = option.substr(strlen("--api-flags=")).ToString();
+          const char* raw_option = argv[i];
+          const std::string_view option(raw_option);
+          if (StartsWith(option, "--input-dex=")) {
+            boot_dex_paths_.push_back(std::string(option.substr(strlen("--input-dex="))));
+          } else if (StartsWith(option, "--output-dex=")) {
+            output_dex_paths_.push_back(std::string(option.substr(strlen("--output-dex="))));
+          } else if (StartsWith(option, "--api-flags=")) {
+            api_flags_path_ = std::string(option.substr(strlen("--api-flags=")));
           } else if (option == "--no-force-assign-all") {
             force_assign_all_ = false;
           } else {
-            Usage("Unknown argument '%s'", option.data());
+            Usage("Unknown argument '%s'", raw_option);
           }
         }
         return Command::kEncode;
       } else if (command == "list") {
         for (int i = 1; i < argc; ++i) {
-          const StringPiece option(argv[i]);
-          if (option.starts_with("--boot-dex=")) {
-            boot_dex_paths_.push_back(option.substr(strlen("--boot-dex=")).ToString());
-          } else if (option.starts_with("--public-stub-classpath=")) {
+          const char* raw_option = argv[i];
+          const std::string_view option(raw_option);
+          if (StartsWith(option, "--boot-dex=")) {
+            boot_dex_paths_.push_back(std::string(option.substr(strlen("--boot-dex="))));
+          } else if (StartsWith(option, "--public-stub-classpath=")) {
             stub_classpaths_.push_back(std::make_pair(
-                option.substr(strlen("--public-stub-classpath=")).ToString(),
+                std::string(option.substr(strlen("--public-stub-classpath="))),
                 ApiList::Whitelist()));
-          } else if (option.starts_with("--core-platform-stub-classpath=")) {
+          } else if (StartsWith(option, "--core-platform-stub-classpath=")) {
             stub_classpaths_.push_back(std::make_pair(
-                option.substr(strlen("--core-platform-stub-classpath=")).ToString(),
+                std::string(option.substr(strlen("--core-platform-stub-classpath="))),
                 ApiList::CorePlatformApi()));
-          } else if (option.starts_with("--out-api-flags=")) {
-            api_flags_path_ = option.substr(strlen("--out-api-flags=")).ToString();
+          } else if (StartsWith(option, "--out-api-flags=")) {
+            api_flags_path_ = std::string(option.substr(strlen("--out-api-flags=")));
           } else {
-            Usage("Unknown argument '%s'", option.data());
+            Usage("Unknown argument '%s'", raw_option);
           }
         }
         return Command::kList;
       } else {
-        Usage("Unknown command '%s'", command.data());
+        Usage("Unknown command '%s'", raw_command);
       }
     } else {
       Usage("No command specified");

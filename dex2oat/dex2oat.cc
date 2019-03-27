@@ -49,7 +49,6 @@
 #include "base/os.h"
 #include "base/scoped_flock.h"
 #include "base/stl_util.h"
-#include "base/stringpiece.h"
 #include "base/time_utils.h"
 #include "base/timing_logger.h"
 #include "base/unix_file/fd_file.h"
@@ -296,6 +295,10 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("      Default: arm");
   UsageError("");
   UsageError("  --instruction-set-features=...,: Specify instruction set features");
+  UsageError("      On target the value 'runtime' can be used to detect features at run time.");
+  UsageError("      If target does not support run-time detection the value 'runtime'");
+  UsageError("      has the same effect as the value 'default'.");
+  UsageError("      Note: the value 'runtime' has no effect if it is used on host.");
   UsageError("      Example: --instruction-set-features=div");
   UsageError("      Default: default");
   UsageError("");
@@ -805,8 +808,7 @@ class Dex2Oat final {
     }
 
     if (!IsBootImage() && parser_options->boot_image_filename.empty()) {
-      parser_options->boot_image_filename += android_root_;
-      parser_options->boot_image_filename += "/framework/boot.art";
+      parser_options->boot_image_filename = GetDefaultBootImageLocation(android_root_);
     }
     if (!parser_options->boot_image_filename.empty()) {
       boot_image_filename_ = parser_options->boot_image_filename;
@@ -875,9 +877,9 @@ class Dex2Oat final {
       oat_unstripped_ = std::move(parser_options->oat_symbols);
     }
 
-    // If no instruction set feature was given, use the default one for the target
-    // instruction set.
-    if (compiler_options_->instruction_set_features_.get() == nullptr) {
+    if (compiler_options_->instruction_set_features_ == nullptr) {
+      // '--instruction-set-features/--instruction-set-variant' were not used.
+      // Use features for the 'default' variant.
       compiler_options_->instruction_set_features_ = InstructionSetFeatures::FromVariant(
           compiler_options_->instruction_set_, "default", &parser_options->error_msg);
       if (compiler_options_->instruction_set_features_ == nullptr) {
@@ -890,9 +892,9 @@ class Dex2Oat final {
       std::unique_ptr<const InstructionSetFeatures> runtime_features(
           InstructionSetFeatures::FromCppDefines());
       if (!compiler_options_->GetInstructionSetFeatures()->Equals(runtime_features.get())) {
-        LOG(WARNING) << "Mismatch between dex2oat instruction set features ("
+        LOG(WARNING) << "Mismatch between dex2oat instruction set features to use ("
             << *compiler_options_->GetInstructionSetFeatures()
-            << ") and those of dex2oat executable (" << *runtime_features
+            << ") and those from CPP defines (" << *runtime_features
             << ") for the command line:\n" << CommandLine();
       }
     }
@@ -955,7 +957,7 @@ class Dex2Oat final {
     compiler_options_->passes_to_run_ = passes_to_run_.get();
     compiler_options_->compiling_with_core_image_ =
         !boot_image_filename_.empty() &&
-        CompilerDriver::IsCoreImageFilename(boot_image_filename_);
+        CompilerOptions::IsCoreImageFilename(boot_image_filename_);
   }
 
   static bool SupportsDeterministicCompilation() {
