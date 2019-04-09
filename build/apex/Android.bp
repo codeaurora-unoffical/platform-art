@@ -82,6 +82,12 @@ art_tools_device_only_binaries = [
     // TODO: Make it work with clang lld.
     "oatdump",
 ]
+// Same, but for only for debug packages.
+art_tools_debug_device_only_binaries = [
+    // oatdumpd cannot link with host linux_bionic due to not using clang lld;
+    // TODO: Make it work with clang lld.
+    "oatdumpd",
+]
 
 // Host-only modules listed in LOCAL_REQUIRED_MODULES for module art-tools in art/Android.mk.
 art_tools_host_only_binaries = [
@@ -168,8 +174,6 @@ apex_defaults {
         + libcore_native_device_only_shared_libs,
     multilib: {
         both: {
-            // TODO: Add logic to create a `dalvikvm` symlink to `dalvikvm32` or `dalvikvm64`
-            // (see `symlink_preferred_arch` in art/dalvikvm/Android.bp).
             binaries: art_runtime_base_binaries_both
                 + bionic_binaries_both,
         },
@@ -177,12 +181,20 @@ apex_defaults {
             binaries: art_runtime_base_binaries_prefer32,
         },
         first: {
-            binaries: [],
+            binaries: art_tools_device_binaries,
         }
     },
+    binaries: [
+        "art_postinstall_hook",
+        "art_preinstall_hook",
+        "art_preinstall_hook_boot",
+        "art_preinstall_hook_system_server",
+        "art_prepostinstall_utils",
+    ],
     prebuilts: art_runtime_data_file_prebuilts
         + ["com.android.runtime.ld.config.txt"],
     key: "com.android.runtime.key",
+    required: ["art_apex_boot_integrity"],
 }
 
 // Release version of the Runtime APEX module (not containing debug
@@ -208,7 +220,7 @@ apex {
                 + art_runtime_debug_binaries_prefer32_device,
         },
         first: {
-            binaries: art_tools_device_binaries,
+            binaries: art_tools_debug_device_only_binaries,
         }
     },
     certificate: ":com.android.runtime.debug.certificate",
@@ -236,8 +248,6 @@ art_apex_test {
         + art_runtime_host_run_test_libs,
     multilib: {
         both: {
-            // TODO: Add logic to create a `dalvikvm` symlink to `dalvikvm32` or `dalvikvm64`
-            // (see `symlink_preferred_arch` in art/dalvikvm/Android.bp).
             binaries: art_runtime_base_binaries_both
                 + art_runtime_debug_binaries_both_host,
         },
@@ -331,4 +341,33 @@ cc_prebuilt_binary {
             enabled: false,  // No python3.
         },
     },
+}
+
+// Pre-install scripts.
+
+sh_binary {
+    name: "art_preinstall_hook",
+    src: "art_preinstall_hook.sh",
+}
+sh_binary {
+    name: "art_preinstall_hook_boot",
+    src: "art_preinstall_hook_boot.sh",
+}
+sh_binary {
+    name: "art_preinstall_hook_system_server",
+    src: "art_preinstall_hook_system_server.sh",
+}
+sh_binary {
+    name: "art_prepostinstall_utils",
+    src: "art_prepostinstall_utils.sh",
+}
+sh_binary {
+    name: "art_postinstall_hook",
+    src: "art_postinstall_hook.sh",
+}
+
+sh_binary {
+    name: "art_apex_boot_integrity",
+    src: "art_apex_boot_integrity.sh",
+    init_rc: ["art_apex_boot_integrity.rc"],
 }
