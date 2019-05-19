@@ -57,6 +57,8 @@ bool ParsedOptions::Parse(const RuntimeOptions& options,
 }
 
 using RuntimeParser = CmdlineParser<RuntimeArgumentMap, RuntimeArgumentMap::Key>;
+using HiddenapiPolicyValueMap =
+    std::initializer_list<std::pair<const char*, hiddenapi::EnforcementPolicy>>;
 
 // Yes, the stack frame is huge. But we get called super early on (and just once)
 // to pass the command line arguments, so we'll probably be ok.
@@ -69,6 +71,13 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
 
   std::unique_ptr<RuntimeParser::Builder> parser_builder =
       std::make_unique<RuntimeParser::Builder>();
+
+  HiddenapiPolicyValueMap hiddenapi_policy_valuemap =
+      {{"disabled",  hiddenapi::EnforcementPolicy::kDisabled},
+       {"just-warn", hiddenapi::EnforcementPolicy::kJustWarn},
+       {"enabled",   hiddenapi::EnforcementPolicy::kEnabled}};
+  DCHECK_EQ(hiddenapi_policy_valuemap.size(),
+            static_cast<size_t>(hiddenapi::EnforcementPolicy::kMax) + 1);
 
   parser_builder->
        Define("-Xzygote")
@@ -89,6 +98,11 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-Ximage:_")
           .WithType<std::string>()
           .IntoKey(M::Image)
+      .Define("-Ximage-load-order:_")
+          .WithType<gc::space::ImageSpaceLoadingOrder>()
+          .WithValueMap({{"system", gc::space::ImageSpaceLoadingOrder::kSystemFirst},
+                         {"data", gc::space::ImageSpaceLoadingOrder::kDataFirst}})
+          .IntoKey(M::ImageSpaceLoadingOrder)
       .Define("-Xcheck:jni")
           .IntoKey(M::CheckJni)
       .Define("-Xjniopts:forcecopy")
@@ -136,6 +150,9 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-XX:ConcGCThreads=_")
           .WithType<unsigned int>()
           .IntoKey(M::ConcGCThreads)
+      .Define("-XX:FinalizerTimeoutMs=_")
+          .WithType<unsigned int>()
+          .IntoKey(M::FinalizerTimeoutMs)
       .Define("-Xss_")
           .WithType<Memory<1>>()
           .IntoKey(M::StackSize)
@@ -326,8 +343,14 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-Xtarget-sdk-version:_")
           .WithType<unsigned int>()
           .IntoKey(M::TargetSdkVersion)
-      .Define("-Xhidden-api-checks")
-          .IntoKey(M::HiddenApiChecks)
+      .Define("-Xhidden-api-policy:_")
+          .WithType<hiddenapi::EnforcementPolicy>()
+          .WithValueMap(hiddenapi_policy_valuemap)
+          .IntoKey(M::HiddenApiPolicy)
+      .Define("-Xcore-platform-api-policy:_")
+          .WithType<hiddenapi::EnforcementPolicy>()
+          .WithValueMap(hiddenapi_policy_valuemap)
+          .IntoKey(M::CorePlatformApiPolicy)
       .Define("-Xuse-stderr-logger")
           .IntoKey(M::UseStderrLogger)
       .Define("-Xonly-use-system-oat-files")
@@ -335,6 +358,10 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-Xverifier-logging-threshold=_")
           .WithType<unsigned int>()
           .IntoKey(M::VerifierLoggingThreshold)
+      .Define("-XX:FastClassNotFoundException=_")
+          .WithType<bool>()
+          .WithValueMap({{"false", false}, {"true", true}})
+          .IntoKey(M::FastClassNotFoundException)
       .Ignore({
           "-ea", "-da", "-enableassertions", "-disableassertions", "--runtime-arg", "-esa",
           "-dsa", "-enablesystemassertions", "-disablesystemassertions", "-Xrs", "-Xint:_",
@@ -705,6 +732,7 @@ void ParsedOptions::Usage(const char* fmt, ...) {
   UsageMessage(stream, "  -XX:+DisableExplicitGC\n");
   UsageMessage(stream, "  -XX:ParallelGCThreads=integervalue\n");
   UsageMessage(stream, "  -XX:ConcGCThreads=integervalue\n");
+  UsageMessage(stream, "  -XX:FinalizerTimeoutMs=integervalue\n");
   UsageMessage(stream, "  -XX:MaxSpinsBeforeThinLockInflation=integervalue\n");
   UsageMessage(stream, "  -XX:LongPauseLogThreshold=integervalue\n");
   UsageMessage(stream, "  -XX:LongGCLogThreshold=integervalue\n");

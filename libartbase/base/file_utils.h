@@ -32,12 +32,17 @@ bool ReadFileToString(const std::string& file_name, std::string* result);
 // Find $ANDROID_ROOT, /system, or abort.
 std::string GetAndroidRoot();
 // Find $ANDROID_ROOT, /system, or return an empty string.
-std::string GetAndroidRootSafe(std::string* error_msg);
+std::string GetAndroidRootSafe(/*out*/ std::string* error_msg);
+
+// Find $ANDROID_RUNTIME_ROOT, /apex/com.android.runtime, or abort.
+std::string GetAndroidRuntimeRoot();
+// Find $ANDROID_RUNTIME_ROOT, /apex/com.android.runtime, or return an empty string.
+std::string GetAndroidRuntimeRootSafe(/*out*/ std::string* error_msg);
 
 // Find $ANDROID_DATA, /data, or abort.
-const char* GetAndroidData();
-// Find $ANDROID_DATA, /data, or return null.
-const char* GetAndroidDataSafe(std::string* error_msg);
+std::string GetAndroidData();
+// Find $ANDROID_DATA, /data, or return an empty string.
+std::string GetAndroidDataSafe(/*out*/ std::string* error_msg);
 
 // Returns the default boot image location (ANDROID_ROOT/framework/boot.art).
 // Returns an empty string if ANDROID_ROOT is not set.
@@ -75,8 +80,11 @@ std::string GetVdexFilename(const std::string& oat_filename);
 //          ReplaceFileExtension("foo", "abc") == "foo.abc"
 std::string ReplaceFileExtension(const std::string& filename, const std::string& new_extension);
 
-// Return whether the location is on apex/com.android.runtime
+// Return whether the location is on /apex/com.android.runtime
 bool LocationIsOnRuntimeModule(const char* location);
+
+// Return whether the location is on /apex/com.android.conscrypt
+bool LocationIsOnConscryptModule(const char* location);
 
 // Return whether the location is on system (i.e. android root).
 bool LocationIsOnSystem(const char* location);
@@ -84,8 +92,18 @@ bool LocationIsOnSystem(const char* location);
 // Return whether the location is on system/framework (i.e. android_root/framework).
 bool LocationIsOnSystemFramework(const char* location);
 
+// Return whether the location is on /apex/.
+bool LocationIsOnApex(const char* location);
+
+// Compare the runtime module root against android root. Returns true if they are
+// both known and distinct. This is meant to be a proxy for 'running with apex'.
+bool RuntimeModuleRootDistinctFromAndroidRoot();
+
 // dup(2), except setting the O_CLOEXEC flag atomically, when possible.
 int DupCloexec(int fd);
+
+// Returns true if `path` begins with a slash.
+inline bool IsAbsoluteLocation(const std::string& path) { return !path.empty() && path[0] == '/'; }
 
 }  // namespace art
 

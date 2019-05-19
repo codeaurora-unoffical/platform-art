@@ -120,7 +120,8 @@ class ClassLinker {
  public:
   static constexpr bool kAppImageMayContainStrings = true;
 
-  explicit ClassLinker(InternTable* intern_table);
+  explicit ClassLinker(InternTable* intern_table,
+                       bool fast_class_not_found_exceptions = true);
   virtual ~ClassLinker();
 
   // Initialize class linker by bootstraping from dex files.
@@ -513,8 +514,6 @@ class ClassLinker {
                                          jobject loader,
                                          jobjectArray methods,
                                          jobjectArray throws)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-  std::string GetDescriptorForProxy(ObjPtr<mirror::Class> proxy_class)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Get the oat code for a method when its class isn't yet initialized.
@@ -1036,15 +1035,15 @@ class ClassLinker {
                    ArtMethod** out_imt)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  mirror::MethodHandle* ResolveMethodHandleForField(Thread* self,
-                                                    const dex::MethodHandleItem& method_handle,
-                                                    ArtMethod* referrer)
-      REQUIRES_SHARED(Locks::mutator_lock_);
+  ObjPtr<mirror::MethodHandle> ResolveMethodHandleForField(
+      Thread* self,
+      const dex::MethodHandleItem& method_handle,
+      ArtMethod* referrer) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  mirror::MethodHandle* ResolveMethodHandleForMethod(Thread* self,
-                                                     const dex::MethodHandleItem& method_handle,
-                                                     ArtMethod* referrer)
-      REQUIRES_SHARED(Locks::mutator_lock_);
+  ObjPtr<mirror::MethodHandle> ResolveMethodHandleForMethod(
+      Thread* self,
+      const dex::MethodHandleItem& method_handle,
+      ArtMethod* referrer) REQUIRES_SHARED(Locks::mutator_lock_);
 
   // A wrapper class representing the result of a method translation used for linking methods and
   // updating superclass default methods. For each method in a classes vtable there are 4 states it
@@ -1368,6 +1367,8 @@ class ClassLinker {
   bool log_new_roots_ GUARDED_BY(Locks::classlinker_classes_lock_);
 
   InternTable* intern_table_;
+
+  const bool fast_class_not_found_exceptions_;
 
   // Trampolines within the image the bounce to runtime entrypoints. Done so that there is a single
   // patch point within the image. TODO: make these proper relocations.

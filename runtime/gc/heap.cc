@@ -35,6 +35,7 @@
 #include "base/histogram-inl.h"
 #include "base/logging.h"  // For VLOG.
 #include "base/memory_tool.h"
+#include "base/mutex.h"
 #include "base/os.h"
 #include "base/stl_util.h"
 #include "base/systrace.h"
@@ -205,7 +206,8 @@ Heap::Heap(size_t initial_size,
            bool use_generational_cc,
            uint64_t min_interval_homogeneous_space_compaction_by_oom,
            bool dump_region_info_before_gc,
-           bool dump_region_info_after_gc)
+           bool dump_region_info_after_gc,
+           space::ImageSpaceLoadingOrder image_space_loading_order)
     : non_moving_space_(nullptr),
       rosalloc_space_(nullptr),
       dlmalloc_space_(nullptr),
@@ -302,6 +304,7 @@ Heap::Heap(size_t initial_size,
       blocking_gc_count_rate_histogram_("blocking gc count rate histogram", 1U,
                                         kGcCountRateMaxBucketCount),
       alloc_tracking_enabled_(false),
+      alloc_record_depth_(AllocRecordObjectMap::kDefaultAllocStackDepth),
       backtrace_lock_(nullptr),
       seen_backtrace_count_(0u),
       unique_backtrace_count_(0u),
@@ -370,6 +373,10 @@ Heap::Heap(size_t initial_size,
                                        boot_class_path_locations,
                                        image_file_name,
                                        image_instruction_set,
+                                       image_space_loading_order,
+                                       runtime->ShouldRelocate(),
+                                       /*executable=*/ !runtime->IsAotCompiler(),
+                                       is_zygote,
                                        heap_reservation_size,
                                        &boot_image_spaces,
                                        &heap_reservation)) {
@@ -887,6 +894,7 @@ void Heap::IncrementDisableThreadFlip(Thread* self) {
   }
   ScopedThreadStateChange tsc(self, kWaitingForGcThreadFlip);
   MutexLock mu(self, *thread_flip_lock_);
+  thread_flip_cond_->CheckSafeToWait(self);
   bool has_waited = false;
   uint64_t wait_start = NanoTime();
   if (thread_flip_running_) {
@@ -932,6 +940,7 @@ void Heap::ThreadFlipBegin(Thread* self) {
   CHECK(kUseReadBarrier);
   ScopedThreadStateChange tsc(self, kWaitingForGcThreadFlip);
   MutexLock mu(self, *thread_flip_lock_);
+  thread_flip_cond_->CheckSafeToWait(self);
   bool has_waited = false;
   uint64_t wait_start = NanoTime();
   CHECK(!thread_flip_running_);
@@ -1422,11 +1431,6 @@ void Heap::Trim(Thread* self) {
   TrimSpaces(self);
   // Trim arenas that may have been used by JIT or verifier.
   runtime->GetArenaPool()->TrimMaps();
-  {
-    // TODO: Move this to a callback called when startup is finished (b/120671223).
-    ScopedTrace trace2("Delete thread pool");
-    runtime->DeleteThreadPool();
-  }
 }
 
 class TrimIndirectReferenceTableClosure : public Closure {
@@ -3226,7 +3230,7 @@ class VerifyReferenceCardVisitor {
 
           // Print which field of the object is dead.
           if (!obj->IsObjectArray()) {
-            mirror::Class* klass = is_static ? obj->AsClass() : obj->GetClass();
+            ObjPtr<mirror::Class> klass = is_static ? obj->AsClass() : obj->GetClass();
             CHECK(klass != nullptr);
             for (ArtField& field : (is_static ? klass->GetSFields() : klass->GetIFields())) {
               if (field.GetOffset().Int32Value() == offset.Int32Value()) {
@@ -3236,7 +3240,7 @@ class VerifyReferenceCardVisitor {
               }
             }
           } else {
-            mirror::ObjectArray<mirror::Object>* object_array =
+            ObjPtr<mirror::ObjectArray<mirror::Object>> object_array =
                 obj->AsObjectArray<mirror::Object>();
             for (int32_t i = 0; i < object_array->GetLength(); ++i) {
               if (object_array->Get(i) == ref) {
@@ -3527,6 +3531,7 @@ collector::GcType Heap::WaitForGcToComplete(GcCause cause, Thread* self) {
 }
 
 collector::GcType Heap::WaitForGcToCompleteLocked(GcCause cause, Thread* self) {
+  gc_complete_cond_->CheckSafeToWait(self);
   collector::GcType last_gc_type = collector::kGcTypeNone;
   GcCause last_gc_cause = kGcCauseNone;
   uint64_t wait_start = NanoTime();
