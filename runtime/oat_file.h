@@ -35,6 +35,7 @@
 #include "index_bss_mapping.h"
 #include "mirror/object.h"
 #include "oat.h"
+#include "runtime.h"
 
 namespace art {
 
@@ -124,6 +125,12 @@ class OatFile {
                                const char* abs_dex_location,
                                std::string* error_msg);
 
+  // Initialize OatFile instance from an already loaded VdexFile. This assumes
+  // the vdex does not have a dex section and accepts a vector of DexFiles separately.
+  static OatFile* OpenFromVdex(const std::vector<const DexFile*>& dex_files,
+                               std::unique_ptr<VdexFile>&& vdex_file,
+                               const std::string& location);
+
   virtual ~OatFile();
 
   bool IsExecutable() const {
@@ -155,6 +162,7 @@ class OatFile {
 
     // Returns size of quick code.
     uint32_t GetQuickCodeSize() const;
+    uint32_t GetQuickCodeSizeOffset() const;
 
     // Returns OatQuickMethodHeader for debugging. Most callers should
     // use more specific methods such as GetQuickCodeSize.
@@ -327,7 +335,12 @@ class OatFile {
   // Initialize relocation sections (.data.bimg.rel.ro and .bss).
   void InitializeRelocations() const;
 
-  // Returns the absolute dex location for the encoded relative dex location.
+  // Constructs the absolute dex location and/or dex file name for the relative dex
+  // location (`rel_dex_location`) in the oat file, using the `abs_dex_location` of
+  // the dex file this oat belongs to.
+  //
+  // The dex file name and dex location differ when cross compiling where the dex file
+  // name is the host path (for opening files) and dex location is the future path on target.
   //
   // If not null, abs_dex_location is used to resolve the absolute dex
   // location of relative dex locations encoded in the oat file.
@@ -336,8 +349,13 @@ class OatFile {
   // to "/data/app/foo/base.apk", "/data/app/foo/base.apk!classes2.dex", etc.
   // Relative encoded dex locations that don't match the given abs_dex_location
   // are left unchanged.
-  static std::string ResolveRelativeEncodedDexLocation(
-      const char* abs_dex_location, const std::string& rel_dex_location);
+  //
+  // Computation of both `dex_file_location` and `dex_file_name` can be skipped
+  // by setting the corresponding out parameter to `nullptr`.
+  static void ResolveRelativeEncodedDexLocation(const char* abs_dex_location,
+                                                const std::string& rel_dex_location,
+                                                /* out */ std::string* dex_file_location,
+                                                /* out */ std::string* dex_file_name = nullptr);
 
   // Finds the associated oat class for a dex_file and descriptor. Returns an invalid OatClass on
   // error and sets found to false.
@@ -402,7 +420,7 @@ class OatFile {
 
   // NOTE: We use a std::string_view as the key type to avoid a memory allocation on every
   // lookup with a const char* key. The std::string_view doesn't own its backing storage,
-  // therefore we're using the OatDexFile::dex_file_location_ as the backing storage
+  // therefore we're using the OatFile's stored dex location as the backing storage
   // for keys in oat_dex_files_ and the string_cache_ entries for the backing storage
   // of keys in secondary_oat_dex_files_ and oat_dex_files_by_canonical_location_.
   using Table =
@@ -452,11 +470,13 @@ class OatDexFile final {
   std::unique_ptr<const DexFile> OpenDexFile(std::string* error_msg) const;
 
   // May return null if the OatDexFile only contains a type lookup table. This case only happens
-  // for the compiler to speed up compilation.
+  // for the compiler to speed up compilation, or in jitzygote.
   const OatFile* GetOatFile() const {
     // Avoid pulling in runtime.h in the header file.
     if (kIsDebugBuild && oat_file_ == nullptr) {
-      AssertAotCompiler();
+      if (!Runtime::Current()->IsUsingApexBootImageLocation()) {
+        AssertAotCompiler();
+      }
     }
     return oat_file_;
   }
@@ -543,6 +563,15 @@ class OatDexFile final {
              const IndexBssMapping* string_bss_mapping,
              const uint32_t* oat_class_offsets_pointer,
              const DexLayoutSections* dex_layout_sections);
+
+  // Create an OatDexFile wrapping an existing DexFile. Will set the OatDexFile
+  // pointer in the DexFile.
+  OatDexFile(const OatFile* oat_file,
+             const DexFile* dex_file,
+             const std::string& dex_file_location,
+             const std::string& canonical_dex_file_location);
+
+  bool IsBackedByVdexOnly() const;
 
   static void AssertAotCompiler();
 

@@ -28,6 +28,7 @@
 #include "base/utils.h"
 #include "class_root.h"
 #include "debugger.h"
+#include "dex/type_lookup_table.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "interpreter/interpreter.h"
 #include "jit-inl.h"
@@ -35,6 +36,7 @@
 #include "jni/java_vm_ext.h"
 #include "mirror/method_handle_impl.h"
 #include "mirror/var_handle.h"
+#include "oat_file.h"
 #include "oat_file_manager.h"
 #include "oat_quick_method_header.h"
 #include "profile/profile_compilation_info.h"
@@ -639,7 +641,7 @@ void Jit::CreateThreadPool() {
   // If we're not using the default boot image location, request a JIT task to
   // compile all methods in the boot image profile.
   Runtime* runtime = Runtime::Current();
-  if (runtime->IsZygote() && !runtime->IsUsingDefaultBootImageLocation()) {
+  if (runtime->IsZygote() && runtime->IsUsingApexBootImageLocation() && UseJitCompilation()) {
     thread_pool_->AddTask(Thread::Current(), new ZygoteTask());
   }
 }
@@ -683,6 +685,18 @@ void Jit::AddNonAotBootMethodsToQueue(Thread* self) {
   ClassLinker* class_linker = runtime->GetClassLinker();
 
   for (const DexFile* dex_file : boot_class_path) {
+    if (LocationIsOnRuntimeModule(dex_file->GetLocation().c_str())) {
+      // The runtime module jars are already preopted.
+      continue;
+    }
+    // To speed up class lookups, generate a type lookup table for
+    // the dex file.
+    DCHECK(dex_file->GetOatDexFile() == nullptr);
+    TypeLookupTable type_lookup_table = TypeLookupTable::Create(*dex_file);
+    type_lookup_tables_.push_back(
+          std::make_unique<art::OatDexFile>(std::move(type_lookup_table)));
+    dex_file->SetOatDexFile(type_lookup_tables_.back().get());
+
     std::set<dex::TypeIndex> class_types;
     std::set<uint16_t> all_methods;
     if (!profile_info.GetClassesAndMethods(*dex_file,
@@ -690,7 +704,8 @@ void Jit::AddNonAotBootMethodsToQueue(Thread* self) {
                                            &all_methods,
                                            &all_methods,
                                            &all_methods)) {
-      LOG(ERROR) << "Unable to get classes and methods for " << dex_file->GetLocation();
+      // This means the profile file did not reference the dex file, which is the case
+      // if there's no classes and methods of that dex file in the profile.
       continue;
     }
     dex_cache.Assign(class_linker->FindDexCache(self, *dex_file));
@@ -708,13 +723,22 @@ void Jit::AddNonAotBootMethodsToQueue(Thread* self) {
       }
       const void* entry_point = method->GetEntryPointFromQuickCompiledCode();
       if (class_linker->IsQuickToInterpreterBridge(entry_point) ||
-          class_linker->IsQuickGenericJniStub(entry_point)) {
+          class_linker->IsQuickGenericJniStub(entry_point) ||
+          class_linker->IsQuickResolutionStub(entry_point)) {
         if (!method->IsNative()) {
           // The compiler requires a ProfilingInfo object for non-native methods.
           ProfilingInfo::Create(self, method, /* retry_allocation= */ true);
         }
-        thread_pool_->AddTask(self,
-            new JitCompileTask(method, JitCompileTask::TaskKind::kCompile));
+        // Special case ZygoteServer class so that it gets compiled before the
+        // zygote enters it. This avoids needing to do OSR during app startup.
+        // TODO: have a profile instead.
+        if (method->GetDeclaringClass()->DescriptorEquals(
+                "Lcom/android/internal/os/ZygoteServer;")) {
+          CompileMethod(method, self, /* baseline= */ false, /* osr= */ false);
+        } else {
+          thread_pool_->AddTask(self,
+              new JitCompileTask(method, JitCompileTask::TaskKind::kCompile));
+        }
       }
     }
   }
@@ -791,6 +815,13 @@ bool Jit::MaybeCompileMethod(Thread* self,
     }
   }
   if (UseJitCompilation()) {
+    if (old_count == 0 &&
+        method->IsNative() &&
+        Runtime::Current()->IsUsingApexBootImageLocation()) {
+      // jitzygote: Compile JNI stub on first use to avoid the expensive generic stub.
+      CompileMethod(method, self, /* baseline= */ false, /* osr= */ false);
+      return true;
+    }
     if (old_count < HotMethodThreshold() && new_count >= HotMethodThreshold()) {
       if (!code_cache_->ContainsPc(method->GetEntryPointFromQuickCompiledCode())) {
         DCHECK(thread_pool_ != nullptr);
@@ -907,6 +938,9 @@ ScopedJitSuspend::~ScopedJitSuspend() {
 
 void Jit::PostForkChildAction(bool is_zygote) {
   if (is_zygote) {
+    // Remove potential tasks that have been inherited from the zygote. Child zygotes
+    // currently don't need the whole boot image compiled (ie webview_zygote).
+    thread_pool_->RemoveAllTasks(Thread::Current());
     // Don't transition if this is for a child zygote.
     return;
   }

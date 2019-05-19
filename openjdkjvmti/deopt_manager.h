@@ -33,13 +33,17 @@
 #define ART_OPENJDKJVMTI_DEOPT_MANAGER_H_
 
 #include <atomic>
+#include <iosfwd>
 #include <unordered_map>
 
 #include "base/mutex.h"
 #include "runtime_callbacks.h"
 
+#include <jvmti.h>
+
 namespace art {
 class ArtMethod;
+class ScopedObjectAccessUnchecked;
 namespace mirror {
 class Class;
 }  // namespace mirror
@@ -75,6 +79,8 @@ class DeoptManager {
   void Setup();
   void Shutdown();
 
+  void DumpDeoptInfo(art::Thread* self, std::ostream& stream);
+
   void RemoveDeoptimizationRequester() REQUIRES(!deoptimization_status_lock_,
                                                 !art::Roles::uninterruptible_);
   void AddDeoptimizationRequester() REQUIRES(!deoptimization_status_lock_,
@@ -98,7 +104,17 @@ class DeoptManager {
       REQUIRES(!deoptimization_status_lock_, !art::Roles::uninterruptible_)
       REQUIRES_SHARED(art::Locks::mutator_lock_);
 
-  void DeoptimizeThread(art::Thread* target) REQUIRES_SHARED(art::Locks::mutator_lock_);
+  jvmtiError AddDeoptimizeThreadMethods(art::ScopedObjectAccessUnchecked& soa, jthread thread)
+      REQUIRES(!deoptimization_status_lock_, !art::Roles::uninterruptible_)
+      REQUIRES_SHARED(art::Locks::mutator_lock_);
+
+  jvmtiError RemoveDeoptimizeThreadMethods(art::ScopedObjectAccessUnchecked& soa, jthread thread)
+      REQUIRES(!deoptimization_status_lock_, !art::Roles::uninterruptible_)
+      REQUIRES_SHARED(art::Locks::mutator_lock_);
+
+  void DeoptimizeThread(art::Thread* target)
+      REQUIRES(!art::Locks::thread_list_lock_)
+      REQUIRES_SHARED(art::Locks::mutator_lock_);
   void DeoptimizeAllThreads() REQUIRES_SHARED(art::Locks::mutator_lock_);
 
   void FinishSetup()
