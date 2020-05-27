@@ -88,9 +88,9 @@ endif
 # All the dependencies that must be built ahead of sync-ing them onto the target device.
 TEST_ART_TARGET_SYNC_DEPS := $(ADB_EXECUTABLE)
 
-include $(art_path)/build/Android.common_test.mk
-include $(art_path)/build/Android.gtest.mk
-include $(art_path)/test/Android.run-test.mk
+#include $(art_path)/build/Android.common_test.mk
+#include $(art_path)/build/Android.gtest.mk
+#include $(art_path)/test/Android.run-test.mk
 
 TEST_ART_TARGET_SYNC_DEPS += $(ART_TEST_TARGET_GTEST_DEPENDENCIES) $(ART_TEST_TARGET_RUN_TEST_DEPENDENCIES)
 
@@ -372,7 +372,7 @@ include $(CLEAR_VARS)
 LOCAL_MODULE := com.android.runtime
 LOCAL_IS_HOST_MODULE := true
 ifneq ($(HOST_OS),darwin)
-  LOCAL_REQUIRED_MODULES += $(APEX_TEST_MODULE)
+  #LOCAL_REQUIRED_MODULES += $(APEX_TEST_MODULE)
 endif
 include $(BUILD_PHONY_PACKAGE)
 
@@ -461,7 +461,7 @@ LOCAL_REQUIRED_MODULES := \
 # they are not supported on host (b/129323791). This is likely due to art_apex disabling host
 # APEX builds when HOST_PREFER_32_BIT is set (b/120617876).
 ifneq ($(HOST_PREFER_32_BIT),true)
-LOCAL_REQUIRED_MODULES += \
+#LOCAL_REQUIRED_MODULES += \
     dexdiag \
     dexlist \
     oatdump \
