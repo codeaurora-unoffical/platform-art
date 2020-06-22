@@ -1555,18 +1555,17 @@ class Dex2Oat final {
     // Note: we're only invalidating the magic data in the file, as dex2oat needs the rest of
     // the information to remain valid.
     if (update_input_vdex_) {
-      std::unique_ptr<BufferedOutputStream> vdex_out =
-          std::make_unique<BufferedOutputStream>(
-              std::make_unique<FileOutputStream>(vdex_files_.back().get()));
-      if (!vdex_out->WriteFully(&VdexFile::VerifierDepsHeader::kVdexInvalidMagic,
-                                arraysize(VdexFile::VerifierDepsHeader::kVdexInvalidMagic))) {
-        PLOG(ERROR) << "Failed to invalidate vdex header. File: " << vdex_out->GetLocation();
+      File* vdex_file = vdex_files_.back().get();
+      if (!vdex_file->PwriteFully(&VdexFile::VerifierDepsHeader::kVdexInvalidMagic,
+                                  arraysize(VdexFile::VerifierDepsHeader::kVdexInvalidMagic),
+                                  /*offset=*/ 0u)) {
+        PLOG(ERROR) << "Failed to invalidate vdex header. File: " << vdex_file->GetPath();
         return false;
       }
 
-      if (!vdex_out->Flush()) {
+      if (vdex_file->Flush() != 0) {
         PLOG(ERROR) << "Failed to flush stream after invalidating header of vdex file."
-                    << " File: " << vdex_out->GetLocation();
+                    << " File: " << vdex_file->GetPath();
         return false;
       }
     }
@@ -2653,6 +2652,7 @@ class Dex2Oat final {
           "android.app",
           "android.os",
           "android.util",
+          "com.android.internal.statsd",
           // Reserved framework-permission packages (includes sub-packages under this path).
           "android.permission",
           // "android.app.role",  // Covered by android.app above.
@@ -2661,7 +2661,7 @@ class Dex2Oat final {
           // Reserved framework-wifi packages (includes sub-packages under these paths).
           "android.hardware.wifi",
           // "android.net.wifi",  // Covered by android.net below.
-          "android.x.net.wifi",
+          "com.android.wifi.x",
           // Reserved framework-tethering package (includes sub-packages under this path).
           "android.net",
       });
@@ -2697,8 +2697,8 @@ class Dex2Oat final {
       }
     } else if (zip_fd_ != -1) {
       DCHECK_EQ(oat_writers_.size(), 1u);
-      if (!oat_writers_[0]->AddZippedDexFilesSource(File(zip_fd_, /* check_usage */ false),
-                                                    zip_location_.c_str())) {
+      if (!oat_writers_[0]->AddDexFileSource(File(zip_fd_, /* check_usage */ false),
+                                             zip_location_.c_str())) {
         return false;
       }
     } else if (oat_writers_.size() > 1u) {
