@@ -31,6 +31,8 @@
 #include <thread>
 #include <time.h>
 
+#include <type_traits>
+
 #include "gc/heap-visit-objects-inl.h"
 #include "gc/heap.h"
 #include "gc/scoped_gc_critical_section.h"
@@ -64,7 +66,11 @@ namespace perfetto_hprof {
 
 constexpr int kJavaHeapprofdSignal = __SIGRTMIN + 6;
 constexpr time_t kWatchdogTimeoutSec = 120;
-constexpr size_t kObjectsPerPacket = 100;
+// This needs to be lower than the maximum acceptable chunk size, because this
+// is checked *before* writing another submessage. We conservatively assume
+// submessages can be up to 100k here for a 500k chunk size.
+// DropBox has a 500k chunk limit, and each chunk needs to parse as a proto.
+constexpr uint32_t kPacketSizeThreshold = 400000;
 constexpr char kByte[1] = {'x'};
 static art::Mutex& GetStateMutex() {
   static art::Mutex state_mutex("perfetto_hprof_state_mutex", art::LockLevel::kGenericBottomLock);
@@ -83,8 +89,8 @@ static State g_state = State::kUninitialized;
 int g_signal_pipe_fds[2];
 static struct sigaction g_orig_act = {};
 
-uint64_t FindOrAppend(std::map<std::string, uint64_t>* m,
-                      const std::string& s) {
+template <typename T>
+uint64_t FindOrAppend(std::map<T, uint64_t>* m, const T& s) {
   auto it = m->find(s);
   if (it == m->end()) {
     std::tie(it, std::ignore) = m->emplace(s, m->size());
@@ -278,22 +284,36 @@ void WaitForDataSource(art::Thread* self) {
 class Writer {
  public:
   Writer(pid_t parent_pid, JavaHprofDataSource::TraceContext* ctx, uint64_t timestamp)
-      : parent_pid_(parent_pid), ctx_(ctx), timestamp_(timestamp) {}
+      : parent_pid_(parent_pid), ctx_(ctx), timestamp_(timestamp),
+        last_written_(ctx_->written()) {}
+
+  // Return whether the next call to GetHeapGraph will create a new TracePacket.
+  bool will_create_new_packet() {
+    return !heap_graph_ || ctx_->written() - last_written_ > kPacketSizeThreshold;
+  }
 
   perfetto::protos::pbzero::HeapGraph* GetHeapGraph() {
-    if (!heap_graph_ || ++objects_written_ % kObjectsPerPacket == 0) {
-      if (heap_graph_) {
-        heap_graph_->set_continued(true);
-      }
-      Finalize();
-
-      trace_packet_ = ctx_->NewTracePacket();
-      trace_packet_->set_timestamp(timestamp_);
-      heap_graph_ = trace_packet_->set_heap_graph();
-      heap_graph_->set_pid(parent_pid_);
-      heap_graph_->set_index(index_++);
+    if (will_create_new_packet()) {
+      CreateNewHeapGraph();
     }
     return heap_graph_;
+  }
+
+  void CreateNewHeapGraph() {
+    if (heap_graph_) {
+      heap_graph_->set_continued(true);
+    }
+    Finalize();
+
+    uint64_t written = ctx_->written();
+
+    trace_packet_ = ctx_->NewTracePacket();
+    trace_packet_->set_timestamp(timestamp_);
+    heap_graph_ = trace_packet_->set_heap_graph();
+    heap_graph_->set_pid(parent_pid_);
+    heap_graph_->set_index(index_++);
+
+    last_written_ = written;
   }
 
   void Finalize() {
@@ -310,12 +330,13 @@ class Writer {
   JavaHprofDataSource::TraceContext* const ctx_;
   const uint64_t timestamp_;
 
+  uint64_t last_written_ = 0;
+
   perfetto::DataSource<JavaHprofDataSource>::TraceContext::TracePacketHandle
       trace_packet_;
   perfetto::protos::pbzero::HeapGraph* heap_graph_ = nullptr;
 
   uint64_t index_ = 0;
-  size_t objects_written_ = 0;
 };
 
 class ReferredObjectsFinder {
@@ -435,6 +456,10 @@ void DumpSmaps(JavaHprofDataSource::TraceContext* ctx) {
   }
 }
 
+uint64_t GetObjectId(const art::mirror::Object* obj) {
+  return reinterpret_cast<uint64_t>(obj) / std::alignment_of<art::mirror::Object>::value;
+}
+
 void DumpPerfetto(art::Thread* self) {
   pid_t parent_pid = getpid();
   LOG(INFO) << "preparing to dump heap for " << parent_pid;
@@ -510,6 +535,7 @@ void DumpPerfetto(art::Thread* self) {
             // (default proto value for a string).
             std::map<std::string, uint64_t> interned_fields{{"", 0}};
             std::map<std::string, uint64_t> interned_locations{{"", 0}};
+            std::map<uintptr_t, uint64_t> interned_classes{{0, 0}};
 
             std::map<art::RootType, std::vector<art::mirror::Object*>> root_objects;
             RootFinder rcf(&root_objects);
@@ -522,8 +548,15 @@ void DumpPerfetto(art::Thread* self) {
               perfetto::protos::pbzero::HeapGraphRoot* root_proto =
                 writer.GetHeapGraph()->add_roots();
               root_proto->set_root_type(ToProtoType(root_type));
-              for (art::mirror::Object* obj : children)
-                object_ids->Append(reinterpret_cast<uintptr_t>(obj));
+              for (art::mirror::Object* obj : children) {
+                if (writer.will_create_new_packet()) {
+                  root_proto->set_object_ids(*object_ids);
+                  object_ids->Reset();
+                  root_proto = writer.GetHeapGraph()->add_roots();
+                  root_proto->set_root_type(ToProtoType(root_type));
+                }
+                object_ids->Append(GetObjectId(obj));
+              }
               root_proto->set_object_ids(*object_ids);
               object_ids->Reset();
             }
@@ -535,20 +568,21 @@ void DumpPerfetto(art::Thread* self) {
 
             art::Runtime::Current()->GetHeap()->VisitObjectsPaused(
                 [&writer, &interned_fields, &interned_locations,
-                &reference_field_ids, &reference_object_ids](
+                &reference_field_ids, &reference_object_ids, &interned_classes](
                     art::mirror::Object* obj) REQUIRES_SHARED(art::Locks::mutator_lock_) {
                   if (obj->IsClass()) {
                     art::mirror::Class* klass = obj->AsClass().Ptr();
                     perfetto::protos::pbzero::HeapGraphType* type_proto =
                       writer.GetHeapGraph()->add_types();
-                    type_proto->set_id(reinterpret_cast<uintptr_t>(klass));
+                    type_proto->set_id(FindOrAppend(&interned_classes,
+                          reinterpret_cast<uintptr_t>(klass)));
                     type_proto->set_class_name(PrettyType(klass));
                     type_proto->set_location_id(FindOrAppend(&interned_locations,
                           klass->GetLocation()));
                   }
 
                   art::mirror::Class* klass = obj->GetClass();
-                  uintptr_t class_id = reinterpret_cast<uintptr_t>(klass);
+                  uintptr_t class_ptr = reinterpret_cast<uintptr_t>(klass);
                   // We need to synethesize a new type for Class<Foo>, which does not exist
                   // in the runtime. Otherwise, all the static members of all classes would be
                   // attributed to java.lang.Class.
@@ -558,16 +592,19 @@ void DumpPerfetto(art::Thread* self) {
                       writer.GetHeapGraph()->add_types();
                     // All pointers are at least multiples of two, so this way we can make sure
                     // we are not colliding with a real class.
-                    class_id = reinterpret_cast<uintptr_t>(obj) | 1;
+                    class_ptr = reinterpret_cast<uintptr_t>(obj) | 1;
+                    auto class_id = FindOrAppend(&interned_classes, class_ptr);
                     type_proto->set_id(class_id);
                     type_proto->set_class_name(obj->PrettyTypeOf());
                     type_proto->set_location_id(FindOrAppend(&interned_locations,
                           obj->AsClass()->GetLocation()));
                   }
 
+                  auto class_id = FindOrAppend(&interned_classes, class_ptr);
+
                   perfetto::protos::pbzero::HeapGraphObject* object_proto =
                     writer.GetHeapGraph()->add_objects();
-                  object_proto->set_id(reinterpret_cast<uintptr_t>(obj));
+                  object_proto->set_id(GetObjectId(obj));
                   object_proto->set_type_id(class_id);
                   object_proto->set_self_size(obj->SizeOf());
 
@@ -577,7 +614,7 @@ void DumpPerfetto(art::Thread* self) {
                   obj->VisitReferences(objf, art::VoidFunctor());
                   for (const auto& p : referred_objects) {
                     reference_field_ids->Append(FindOrAppend(&interned_fields, p.first));
-                    reference_object_ids->Append(reinterpret_cast<uintptr_t>(p.second));
+                    reference_object_ids->Append(GetObjectId(p.second));
                   }
                   object_proto->set_reference_field_id(*reference_field_ids);
                   object_proto->set_reference_object_id(*reference_object_ids);
